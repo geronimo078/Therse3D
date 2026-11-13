@@ -1,4 +1,4 @@
-﻿import type { Engine } from '../core/Engine';
+import type { Engine } from '../core/Engine';
 import { MATERIAL_PRESETS } from '../entities/Materials';
 
 /**
@@ -39,9 +39,14 @@ export const THERSE3D_SCENE_SCHEMA = {
           id: { type: 'string' },
           type: {
             type: 'string',
-            enum: ['box', 'sphere', 'cylinder', 'plane', 'line', 'model'],
+            enum: ['box', 'sphere', 'cylinder', 'plane', 'line', 'model', 'group', 'light'],
           },
+          parent: { type: 'string' },
           src: { type: 'string' },
+          kind: { type: 'string', enum: ['point', 'directional', 'spot'] },
+          intensity: { type: 'number', minimum: 0 },
+          range: { type: 'number', minimum: 0.1 },
+          castShadow: { type: 'boolean' },
           position: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
           rotation: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 4 },
           scale: {
@@ -104,6 +109,24 @@ export const THERSE3D_TOOL_DEFINITIONS = [
     parameters: THERSE3D_SCENE_SCHEMA,
   },
   {
+    name: 'therse_patch_scene',
+    description: 'Applies partial upsert/remove updates to existing entities without resending the full scene.',
+    parameters: {
+      type: 'object',
+      properties: {
+        preset: { type: 'string' },
+        transition: { type: 'number', minimum: 0 },
+        upsert: THERSE3D_SCENE_SCHEMA.properties.entities,
+        remove: { type: 'array', items: { type: 'string' } },
+      },
+    },
+  },
+  {
+    name: 'therse_undo',
+    description: 'Reverts the scene to the previous state before the last sync or patch.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
     name: 'therse_inspect',
     description: 'Returns spatial graph, visibility, screen regions, and collision warnings.',
     parameters: { type: 'object', properties: {} },
@@ -137,11 +160,11 @@ export class Schema {
     const materials = Object.keys(MATERIAL_PRESETS).join(', ');
     const lines = [
       'therse3d AI-Native WebGPU 3D Engine',
-      'Primitives: box, sphere, cylinder, plane, line, model',
+      'Primitives: box, sphere, cylinder, plane, line, model, group, light',
       `Materials: ${materials}`,
-      'Layout: on (entityId|"floor"), align (center|front|back|left|right|front-left|front-right|back-left|back-right), margin, offset [dx,dy,dz], lookAt',
+      'Hierarchy & Layout: parent (entityId), on (entityId|"floor"), align (center|front|back|left|right|front-left|front-right|back-left|back-right), margin, offset [dx,dy,dz], lookAt',
       'Presets: studio, outdoor, dark-ui, cad-blueprint, minimal',
-      'Tools: therse_sync_scene, therse_inspect, therse_snapshot, therse_camera_focus',
+      'Tools: therse_sync_scene, therse_patch_scene, therse_undo, therse_inspect, therse_snapshot, therse_camera_focus',
     ];
 
     if (app) {

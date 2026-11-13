@@ -1,13 +1,16 @@
-﻿import type { Engine } from '../core/Engine';
+import type { Engine } from '../core/Engine';
 import type { SpatialPlacement } from '../core/SpatialLayout';
 import type { EntityHandle } from './EntityHandle';
 import type { MaterialDefinition, MaterialPresetName } from './Materials';
 
-export type PrimitiveType = 'box' | 'sphere' | 'cylinder' | 'plane' | 'line' | 'model';
+export type PrimitiveType = 'box' | 'sphere' | 'cylinder' | 'plane' | 'line' | 'model' | 'group' | 'light';
+export type LightKind = 'point' | 'directional' | 'spot';
 
 export interface PrimitiveOptions extends SpatialPlacement {
   id?: string;
+  parent?: string;
   position?: [number, number, number];
+  rotation?: [number, number, number] | [number, number, number, number];
   scale?: [number, number, number] | number;
   size?: [number, number, number];
   radius?: number;
@@ -17,10 +20,14 @@ export interface PrimitiveOptions extends SpatialPlacement {
   emissive?: number;
   visible?: boolean;
   material?: MaterialPresetName | Partial<MaterialDefinition>;
+  kind?: LightKind;
+  intensity?: number;
+  range?: number;
+  castShadow?: boolean;
 }
 
 export interface PrimitiveDescriptor extends PrimitiveOptions {
-  readonly kind: 'primitive-descriptor';
+  readonly __descriptor: 'primitive-descriptor';
   readonly type: PrimitiveType;
 }
 
@@ -39,13 +46,13 @@ function makeFactory(type: PrimitiveType) {
   ): PrimitiveDescriptor | EntityHandle {
     if (engineOrOptions && typeof (engineOrOptions as Engine).add === 'function') {
       return (engineOrOptions as Engine).add({
-        kind: 'primitive-descriptor',
+        __descriptor: 'primitive-descriptor',
         type,
         ...maybeOptions,
       });
     }
     return {
-      kind: 'primitive-descriptor',
+      __descriptor: 'primitive-descriptor',
       type,
       ...(engineOrOptions as PrimitiveOptions | undefined),
     };
@@ -59,6 +66,8 @@ export const Cylinder = makeFactory('cylinder');
 export const Plane = makeFactory('plane');
 export const Line = makeFactory('line');
 export const Model = makeFactory('model');
+export const Group = makeFactory('group');
+export const Light = makeFactory('light');
 
 /**
  * Prozeduraler Unit-Box-Generator (1x1x1 um Ursprung, 24 Vertices, 36 Indices).

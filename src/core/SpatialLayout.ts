@@ -1,4 +1,4 @@
-﻿import { quat } from './Math';
+import { quat } from './Math';
 import { DirtyFlag, GeometryTypeId, type WorldStore } from './WorldStore';
 
 /**
@@ -40,10 +40,10 @@ const FLOOR_AABB: AABB = {
 
 export class SpatialLayout {
   /**
-   * Topologische Sortierung von Layout-Nodes nach `on`-Abhängigkeiten.
+   * Topologische Sortierung von Layout-Nodes nach `on`- und `parent`-Abhängigkeiten.
    * Erkennt Zyklen fehlertolerant und meldet Warnungen statt zu crashen.
    */
-  topologicalSort<T extends { id: string; on?: string }>(
+  topologicalSort<T extends { id: string; on?: string; parent?: string }>(
     nodes: readonly T[],
     warnings?: string[],
   ): T[] {
@@ -61,14 +61,20 @@ export class SpatialLayout {
     const visit = (node: T) => {
       if (visited.has(node.id)) return;
       if (visiting.has(node.id)) {
-        warnings?.push(`Circular "on" dependency detected involving "${node.id}".`);
+        warnings?.push(`Circular "on"/"parent" dependency detected involving "${node.id}".`);
         return;
       }
       visiting.add(node.id);
+      if (node.parent && node.parent !== node.id) {
+        const parentNode = byId.get(node.parent);
+        if (parentNode) {
+          visit(parentNode);
+        }
+      }
       if (node.on && node.on !== node.id) {
-        const parent = byId.get(node.on);
-        if (parent) {
-          visit(parent);
+        const onNode = byId.get(node.on);
+        if (onNode) {
+          visit(onNode);
         }
       }
       visiting.delete(node.id);

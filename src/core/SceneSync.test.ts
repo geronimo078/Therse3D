@@ -1,4 +1,4 @@
-﻿import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { SceneSync } from './SceneSync';
 import { WorldStore } from './WorldStore';
 
@@ -84,6 +84,42 @@ describe('SceneSync (Step 4)', () => {
     const id = sync.getEntityId('broken')!;
     expect(Number.isFinite(store.positions[id * 3])).toBe(true);
     expect(Number.isFinite(store.positions[id * 3 + 2])).toBe(true);
+  });
+
+  it('supports partial patch(), undo(), parent hierarchy, and declarative lights', () => {
+    const store = new WorldStore(16);
+    const sync = new SceneSync(store);
+
+    sync.apply({
+      transition: 0,
+      entities: [
+        { id: 'rig', type: 'group', position: [10, 0, 0] },
+        { id: 'lamp', type: 'light', kind: 'point', parent: 'rig', position: [0, 2, 0], color: '#ffaa44', intensity: 3.5 },
+        { id: 'box', type: 'box', position: [0, 0.5, 0] },
+      ],
+    });
+
+    const lampId = sync.getEntityId('lamp')!;
+    expect(store.modelMatrices[lampId * 16 + 12]).toBeCloseTo(10);
+    expect(store.modelMatrices[lampId * 16 + 13]).toBeCloseTo(2);
+    expect(store.lightParams[lampId * 4 + 1]).toBeCloseTo(3.5);
+
+    // Partial patch: update rig position & remove box without resending lamp
+    const patchRes = sync.patch({
+      transition: 0,
+      upsert: [{ id: 'rig', type: 'group', position: [15, 0, 0] }],
+      remove: ['box'],
+    });
+    expect(patchRes.removed).toBe(1);
+    expect(sync.getEntityId('box')).toBeUndefined();
+    expect(store.modelMatrices[lampId * 16 + 12]).toBeCloseTo(15);
+
+    // Undo reverts to state before patch
+    expect(sync.canUndo).toBe(true);
+    const undoRes = sync.undo();
+    expect(undoRes.warnings).toEqual([]);
+    expect(sync.getEntityId('box')).toBeDefined();
+    expect(store.modelMatrices[sync.getEntityId('lamp')! * 16 + 12]).toBeCloseTo(10);
   });
 });
 

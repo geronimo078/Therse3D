@@ -1,4 +1,4 @@
-﻿import type { GPUDeviceContext } from './Device';
+import type { GPUDeviceContext } from './Device';
 import { GeometryTypeId, type WorldStore } from '../core/WorldStore';
 import { BufferManager } from './BufferManager';
 import {
@@ -105,7 +105,8 @@ export class Renderer {
   private readonly meshes = new Map<GeometryTypeId, GeometryGpuMesh>();
 
   private readonly uniformBuffer: GPUBuffer;
-  private readonly uniformScratch = new Float32Array(36); // mat4(16) + 5*vec4(20)
+  // mat4(16) + 5*vec4(20) + counts(4) + 8*DynamicLight(64) + 16*vec4 shadowCasters(64) = 168 floats
+  private readonly uniformScratch = new Float32Array(168);
 
   private allocatedCapacity = 0;
   private modelBuffer!: GPUBuffer;
@@ -115,9 +116,9 @@ export class Renderer {
   private bindGroup!: GPUBindGroup;
 
   // Pre-allocated CPU scratch buffers for zero-allocation instancing bucketing
-  private readonly bucketCounts = new Uint32Array(6);
-  private readonly bucketOffsets = new Uint32Array(6);
-  private readonly bucketCursors = new Uint32Array(6);
+  private readonly bucketCounts = new Uint32Array(8);
+  private readonly bucketOffsets = new Uint32Array(8);
+  private readonly bucketCursors = new Uint32Array(8);
   private packedInstanceIds!: Uint32Array;
 
   // Render target textures (recreated on canvas resize)
@@ -302,13 +303,15 @@ export class Renderer {
     u.set(presetCfg.groundColor, 24);
     u.set(presetCfg.keyLightDir, 28);
     u.set(presetCfg.keyLightColor, 32);
-    this.buffers.writeBuffer(this.uniformBuffer, u);
 
     const n = this.store.highWaterMark;
     const counts = this.bucketCounts;
     const offsets = this.bucketOffsets;
     const cursors = this.bucketCursors;
     counts.fill(0);
+
+    let dynamicLightCount = 0;
+    let shadowCasterCount = 0;
 
     if (n > 0) {
       this.buffers.writeBuffer(this.modelBuffer, this.store.modelMatrices, 0, 0, n * 16);
@@ -318,17 +321,53 @@ export class Renderer {
       const alive = this.store.alive;
       const vis = this.store.visible;
       const gTypes = this.store.geometryTypes;
+      const mats = this.store.modelMatrices;
+      const cols = this.store.colors;
+      const lParams = this.store.lightParams;
+      const bMin = this.store.boundsMin;
+      const bMax = this.store.boundsMax;
 
       for (let id = 0; id < n; id++) {
         if (alive[id] === 0 || vis[id] === 0) continue;
         const gType = gTypes[id] ?? 0;
-        if (gType < 6) {
+        if (gType < 8) {
           counts[gType] = (counts[gType] ?? 0) + 1;
+        }
+
+        if (gType === GeometryTypeId.Light && dynamicLightCount < 8) {
+          const base = 40 + dynamicLightCount * 8;
+          const mOff = id * 16;
+          const cOff = id * 4;
+          u[base + 0] = mats[mOff + 12] ?? 0;
+          u[base + 1] = mats[mOff + 13] ?? 0;
+          u[base + 2] = mats[mOff + 14] ?? 0;
+          u[base + 3] = lParams[cOff] ?? 0; // kind: 0 = point, 1 = directional
+          u[base + 4] = cols[cOff] ?? 1;
+          u[base + 5] = cols[cOff + 1] ?? 1;
+          u[base + 6] = cols[cOff + 2] ?? 1;
+          u[base + 7] = lParams[cOff + 1] ?? 1; // intensity
+          dynamicLightCount++;
+        } else if (
+          (gType === GeometryTypeId.Box || gType === GeometryTypeId.Sphere || gType === GeometryTypeId.Cylinder) &&
+          shadowCasterCount < 16
+        ) {
+          const base = 104 + shadowCasterCount * 4;
+          const pIdx = id * 3;
+          const minX = bMin[pIdx] ?? 0;
+          const minY = bMin[pIdx + 1] ?? 0;
+          const minZ = bMin[pIdx + 2] ?? 0;
+          const maxX = bMax[pIdx] ?? 0;
+          const maxZ = bMax[pIdx + 2] ?? 0;
+          u[base + 0] = (minX + maxX) * 0.5;
+          u[base + 1] = minY;
+          u[base + 2] = (minZ + maxZ) * 0.5;
+          u[base + 3] = Math.max(maxX - minX, maxZ - minZ) * 0.5;
+          shadowCasterCount++;
         }
       }
 
       let totalVisible = 0;
-      for (let t = 0; t < 6; t++) {
+      for (let t = 0; t < 8; t++) {
         offsets[t] = totalVisible;
         cursors[t] = totalVisible;
         totalVisible += counts[t] ?? 0;
@@ -339,7 +378,7 @@ export class Renderer {
         for (let id = 0; id < n; id++) {
           if (alive[id] === 0 || vis[id] === 0) continue;
           const gType = gTypes[id] ?? 0;
-          if (gType < 6) {
+          if (gType < 8) {
             const dst = cursors[gType] ?? 0;
             packed[dst] = id;
             cursors[gType] = dst + 1;
@@ -348,6 +387,12 @@ export class Renderer {
         this.buffers.writeBuffer(this.instanceIdBuffer, packed, 0, 0, totalVisible);
       }
     }
+
+    u[36] = dynamicLightCount;
+    u[37] = shadowCasterCount;
+    u[38] = 0;
+    u[39] = 0;
+    this.buffers.writeBuffer(this.uniformBuffer, u);
 
     const encoder = this.gpu.device.createCommandEncoder();
     const resolveView = this.gpu.context.getCurrentTexture().createView();
@@ -503,14 +548,15 @@ export class Renderer {
     u.set(presetCfg.groundColor, 24);
     u.set(presetCfg.keyLightDir, 28);
     u.set(presetCfg.keyLightColor, 32);
-    this.buffers.writeBuffer(this.uniformBuffer, u);
-    this.buffers.writeBuffer(this.captureUniformBuffer!, cu);
 
     const n = this.store.highWaterMark;
     const counts = this.bucketCounts;
     const offsets = this.bucketOffsets;
     const cursors = this.bucketCursors;
     counts.fill(0);
+
+    let dynamicLightCount = 0;
+    let shadowCasterCount = 0;
 
     if (n > 0) {
       this.buffers.writeBuffer(this.modelBuffer, this.store.modelMatrices, 0, 0, n * 16);
@@ -520,14 +566,51 @@ export class Renderer {
       const alive = this.store.alive;
       const vis = this.store.visible;
       const gTypes = this.store.geometryTypes;
+      const mats = this.store.modelMatrices;
+      const cols = this.store.colors;
+      const lParams = this.store.lightParams;
+      const bMin = this.store.boundsMin;
+      const bMax = this.store.boundsMax;
+
       for (let id = 0; id < n; id++) {
         if (alive[id] === 0 || vis[id] === 0) continue;
         const gType = gTypes[id] ?? 0;
-        if (gType < 6) counts[gType] = (counts[gType] ?? 0) + 1;
+        if (gType < 8) counts[gType] = (counts[gType] ?? 0) + 1;
+
+        if (gType === GeometryTypeId.Light && dynamicLightCount < 8) {
+          const base = 40 + dynamicLightCount * 8;
+          const mOff = id * 16;
+          const cOff = id * 4;
+          u[base + 0] = mats[mOff + 12] ?? 0;
+          u[base + 1] = mats[mOff + 13] ?? 0;
+          u[base + 2] = mats[mOff + 14] ?? 0;
+          u[base + 3] = lParams[cOff] ?? 0;
+          u[base + 4] = cols[cOff] ?? 1;
+          u[base + 5] = cols[cOff + 1] ?? 1;
+          u[base + 6] = cols[cOff + 2] ?? 1;
+          u[base + 7] = lParams[cOff + 1] ?? 1;
+          dynamicLightCount++;
+        } else if (
+          (gType === GeometryTypeId.Box || gType === GeometryTypeId.Sphere || gType === GeometryTypeId.Cylinder) &&
+          shadowCasterCount < 16
+        ) {
+          const base = 104 + shadowCasterCount * 4;
+          const pIdx = id * 3;
+          const minX = bMin[pIdx] ?? 0;
+          const minY = bMin[pIdx + 1] ?? 0;
+          const minZ = bMin[pIdx + 2] ?? 0;
+          const maxX = bMax[pIdx] ?? 0;
+          const maxZ = bMax[pIdx + 2] ?? 0;
+          u[base + 0] = (minX + maxX) * 0.5;
+          u[base + 1] = minY;
+          u[base + 2] = (minZ + maxZ) * 0.5;
+          u[base + 3] = Math.max(maxX - minX, maxZ - minZ) * 0.5;
+          shadowCasterCount++;
+        }
       }
 
       let totalVisible = 0;
-      for (let t = 0; t < 6; t++) {
+      for (let t = 0; t < 8; t++) {
         offsets[t] = totalVisible;
         cursors[t] = totalVisible;
         totalVisible += counts[t] ?? 0;
@@ -538,7 +621,7 @@ export class Renderer {
         for (let id = 0; id < n; id++) {
           if (alive[id] === 0 || vis[id] === 0) continue;
           const gType = gTypes[id] ?? 0;
-          if (gType < 6) {
+          if (gType < 8) {
             const dst = cursors[gType] ?? 0;
             packed[dst] = id;
             cursors[gType] = dst + 1;
@@ -547,6 +630,13 @@ export class Renderer {
         this.buffers.writeBuffer(this.instanceIdBuffer, packed, 0, 0, totalVisible);
       }
     }
+
+    u[36] = dynamicLightCount;
+    u[37] = shadowCasterCount;
+    u[38] = 0;
+    u[39] = 0;
+    this.buffers.writeBuffer(this.uniformBuffer, u);
+    this.buffers.writeBuffer(this.captureUniformBuffer!, cu);
 
     const bytesPerRow = Math.ceil((width * 4) / 256) * 256;
     const readbackSize = bytesPerRow * height;

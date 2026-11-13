@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Zero-Allocation Mathe-Helfer (vec3, mat4, quat, aabb).
  * Alle Funktionen schreiben direkt in übergebene Ziel-Arrays/TypedArrays, um GC-Druck im Render-Loop zu vermeiden.
  */
@@ -274,6 +274,45 @@ export const mat4 = {
     out[13] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
     out[14] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
     out[15] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+    return out;
+  },
+
+  multiplyOffset(
+    out: Mat4,
+    outOffset: number,
+    a: Mat4,
+    aOffset: number,
+    b: Mat4,
+    bOffset: number,
+  ): Mat4 {
+    const a00 = a[aOffset + 0] ?? 0, a01 = a[aOffset + 1] ?? 0, a02 = a[aOffset + 2] ?? 0, a03 = a[aOffset + 3] ?? 0;
+    const a10 = a[aOffset + 4] ?? 0, a11 = a[aOffset + 5] ?? 0, a12 = a[aOffset + 6] ?? 0, a13 = a[aOffset + 7] ?? 0;
+    const a20 = a[aOffset + 8] ?? 0, a21 = a[aOffset + 9] ?? 0, a22 = a[aOffset + 10] ?? 0, a23 = a[aOffset + 11] ?? 0;
+    const a30 = a[aOffset + 12] ?? 0, a31 = a[aOffset + 13] ?? 0, a32 = a[aOffset + 14] ?? 0, a33 = a[aOffset + 15] ?? 0;
+
+    let b0 = b[bOffset + 0] ?? 0, b1 = b[bOffset + 1] ?? 0, b2 = b[bOffset + 2] ?? 0, b3 = b[bOffset + 3] ?? 0;
+    out[outOffset + 0] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+    out[outOffset + 1] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+    out[outOffset + 2] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+    out[outOffset + 3] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+
+    b0 = b[bOffset + 4] ?? 0; b1 = b[bOffset + 5] ?? 0; b2 = b[bOffset + 6] ?? 0; b3 = b[bOffset + 7] ?? 0;
+    out[outOffset + 4] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+    out[outOffset + 5] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+    out[outOffset + 6] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+    out[outOffset + 7] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+
+    b0 = b[bOffset + 8] ?? 0; b1 = b[bOffset + 9] ?? 0; b2 = b[bOffset + 10] ?? 0; b3 = b[bOffset + 11] ?? 0;
+    out[outOffset + 8] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+    out[outOffset + 9] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+    out[outOffset + 10] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+    out[outOffset + 11] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+
+    b0 = b[bOffset + 12] ?? 0; b1 = b[bOffset + 13] ?? 0; b2 = b[bOffset + 14] ?? 0; b3 = b[bOffset + 15] ?? 0;
+    out[outOffset + 12] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+    out[outOffset + 13] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+    out[outOffset + 14] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+    out[outOffset + 15] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
     return out;
   },
 

@@ -1,5 +1,5 @@
-﻿import type { Engine } from '../core/Engine';
-import type { CameraAnglePreset, SceneSyncState } from '../core/SceneSync';
+import type { Engine } from '../core/Engine';
+import type { CameraAnglePreset, ScenePatchState, SceneSyncState } from '../core/SceneSync';
 import type { SnapshotOptions } from './Snapshot';
 
 export interface McpBridgeOptions {
@@ -9,6 +9,8 @@ export interface McpBridgeOptions {
 
 export type McpToolName =
   | 'therse_sync_scene'
+  | 'therse_patch_scene'
+  | 'therse_undo'
   | 'therse_inspect'
   | 'therse_snapshot'
   | 'therse_camera_focus';
@@ -90,6 +92,18 @@ export class McpBridge {
     switch (tool) {
       case 'therse_sync_scene': {
         const report = this.engine.sync(args as SceneSyncState);
+        const scene = this.engine.describe();
+        return { report, scene };
+      }
+
+      case 'therse_patch_scene': {
+        const report = this.engine.patch(args as ScenePatchState);
+        const scene = this.engine.describe();
+        return { report, scene };
+      }
+
+      case 'therse_undo': {
+        const report = this.engine.undo();
         const scene = this.engine.describe();
         return { report, scene };
       }

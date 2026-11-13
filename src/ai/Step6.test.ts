@@ -1,4 +1,4 @@
-﻿import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Schema, THERSE3D_SCENE_SCHEMA, THERSE3D_TOOL_DEFINITIONS } from './Schema';
 import { McpBridge } from './McpBridge';
 import { GltfLoader } from '../entities/GltfLoader';
@@ -73,6 +73,8 @@ describe('Schema & PromptContext (Step 6)', () => {
     expect(THERSE3D_SCENE_SCHEMA.required).toEqual(['entities']);
     expect(THERSE3D_TOOL_DEFINITIONS.map((t) => t.name)).toEqual([
       'therse_sync_scene',
+      'therse_patch_scene',
+      'therse_undo',
       'therse_inspect',
       'therse_snapshot',
       'therse_camera_focus',
@@ -86,9 +88,11 @@ describe('Schema & PromptContext (Step 6)', () => {
 });
 
 describe('McpBridge (Step 6)', () => {
-  it('dispatches all 4 standardized agent tools cleanly', async () => {
+  it('dispatches all standardized agent tools cleanly', async () => {
     const mockEngine = {
       sync: vi.fn().mockReturnValue({ applied: 1, added: 1, updated: 0, removed: 0, warnings: [] }),
+      patch: vi.fn().mockReturnValue({ applied: 1, added: 0, updated: 1, removed: 0, warnings: [] }),
+      undo: vi.fn().mockReturnValue({ applied: 1, added: 0, updated: 1, removed: 0, warnings: [] }),
       describe: vi.fn().mockReturnValue({ entityCount: 1, entities: [], warnings: [] }),
       snapshot: vi.fn().mockResolvedValue({ width: 800, height: 600, annotatedDataUrl: 'data:image/png;base64,abc' }),
       focusCamera: vi.fn(),
@@ -98,6 +102,12 @@ describe('McpBridge (Step 6)', () => {
 
     const syncRes = (await bridge.handleToolCall('therse_sync_scene', { entities: [] })) as { report: { applied: number } };
     expect(syncRes.report.applied).toBe(1);
+
+    const patchRes = (await bridge.handleToolCall('therse_patch_scene', { upsert: [] })) as { report: { updated: number } };
+    expect(patchRes.report.updated).toBe(1);
+
+    await bridge.handleToolCall('therse_undo');
+    expect(mockEngine.undo).toHaveBeenCalled();
 
     await bridge.handleToolCall('therse_inspect');
     expect(mockEngine.describe).toHaveBeenCalled();

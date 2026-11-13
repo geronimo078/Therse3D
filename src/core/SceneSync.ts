@@ -1,8 +1,8 @@
-﻿import { quat } from './Math';
+import { quat } from './Math';
 import { SpatialLayout, type SpatialPlacement } from './SpatialLayout';
-import { DirtyFlag, GeometryTypeId, type WorldStore } from './WorldStore';
+import { DirtyFlag, GeometryTypeId, LightKindId, type WorldStore } from './WorldStore';
 import { parseColor, resolveMaterial } from '../entities/Materials';
-import type { PrimitiveType } from '../entities/Primitives';
+import type { LightKind, PrimitiveType } from '../entities/Primitives';
 
 export type CameraAnglePreset = 'front' | 'front-elevated' | 'top' | 'isometric';
 
@@ -15,6 +15,7 @@ export interface SceneSyncCamera {
 export interface SceneSyncNode extends SpatialPlacement {
   id: string;
   type: PrimitiveType | string;
+  parent?: string;
   position?: [number, number, number];
   rotation?: [number, number, number] | [number, number, number, number];
   scale?: [number, number, number] | number;
@@ -26,6 +27,10 @@ export interface SceneSyncNode extends SpatialPlacement {
   emissive?: number;
   visible?: boolean;
   material?: string;
+  kind?: LightKind;
+  intensity?: number;
+  range?: number;
+  castShadow?: boolean;
 }
 
 export interface SceneSyncState {
@@ -33,6 +38,14 @@ export interface SceneSyncState {
   transition?: number;
   camera?: SceneSyncCamera;
   entities: SceneSyncNode[];
+}
+
+export interface ScenePatchState {
+  preset?: string;
+  transition?: number;
+  camera?: SceneSyncCamera;
+  upsert?: SceneSyncNode[];
+  remove?: string[];
 }
 
 export interface SceneSyncResult {
@@ -57,6 +70,14 @@ const VALID_TYPE_MAP: Record<string, GeometryTypeId> = {
   plane: GeometryTypeId.Plane,
   line: GeometryTypeId.Line,
   model: GeometryTypeId.Model,
+  group: GeometryTypeId.Group,
+  light: GeometryTypeId.Light,
+};
+
+const LIGHT_KIND_MAP: Record<string, LightKindId> = {
+  point: LightKindId.Point,
+  directional: LightKindId.Directional,
+  spot: LightKindId.Spot,
 };
 
 function sanitizeNum(v: unknown, fallback: number, label: string, warnings: string[]): number {
@@ -91,6 +112,9 @@ export class SceneSync {
   private readonly store: WorldStore | undefined;
   private readonly layout: SpatialLayout;
   private readonly nameToEntityId = new Map<string, number>();
+  private readonly history: SceneSyncState[] = [];
+  private readonly maxHistory = 32;
+  private currentState: SceneSyncState = { entities: [] };
 
   // Pre-allocated tween buffers (indexed by entityId, grown only if store grows)
   private tweenCapacity = 0;
@@ -137,12 +161,88 @@ export class SceneSync {
     this.tweenTargetColor = growFloat32(this.tweenTargetColor, capacity * 4);
   }
 
-  apply(state: SceneSyncState, hooks?: SceneSyncHooks): SceneSyncResult {
+  get canUndo(): boolean {
+    return this.history.length > 0;
+  }
+
+  get historyLength(): number {
+    return this.history.length;
+  }
+
+  patch(patchState: ScenePatchState, hooks?: SceneSyncHooks): SceneSyncResult {
+    const warnings: string[] = [];
+    if (!patchState || typeof patchState !== 'object') {
+      warnings.push('ScenePatchState must be an object; ignoring patch.');
+      return { applied: 0, added: 0, updated: 0, removed: 0, warnings };
+    }
+
+    const nodeMap = new Map<string, SceneSyncNode>();
+    for (const existing of this.currentState.entities) {
+      nodeMap.set(existing.id, { ...existing });
+    }
+
+    if (Array.isArray(patchState.remove)) {
+      for (const id of patchState.remove) {
+        if (!nodeMap.delete(id)) {
+          warnings.push(`Patch remove skipped unknown entity "${id}".`);
+        }
+      }
+    }
+
+    if (Array.isArray(patchState.upsert)) {
+      for (const incoming of patchState.upsert) {
+        if (!incoming || typeof incoming.id !== 'string' || incoming.id.trim() === '') {
+          warnings.push('Patch upsert node without valid "id" skipped.');
+          continue;
+        }
+        const prev = nodeMap.get(incoming.id);
+        nodeMap.set(incoming.id, prev ? { ...prev, ...incoming } : { ...incoming });
+      }
+    }
+
+    const nextState: SceneSyncState = {
+      entities: Array.from(nodeMap.values()),
+      ...(patchState.preset !== undefined
+        ? { preset: patchState.preset }
+        : this.currentState.preset !== undefined
+          ? { preset: this.currentState.preset }
+          : {}),
+      ...(patchState.transition !== undefined ? { transition: patchState.transition } : {}),
+      ...(patchState.camera !== undefined ? { camera: patchState.camera } : {}),
+    };
+
+    const result = this.apply(nextState, hooks);
+    result.warnings.unshift(...warnings);
+    return result;
+  }
+
+  undo(hooks?: SceneSyncHooks): SceneSyncResult {
+    const prev = this.history.pop();
+    if (!prev) {
+      return {
+        applied: 0,
+        added: 0,
+        updated: 0,
+        removed: 0,
+        warnings: ['Nothing to undo; history is empty.'],
+      };
+    }
+    return this.apply(prev, hooks, false);
+  }
+
+  apply(state: SceneSyncState, hooks?: SceneSyncHooks, recordHistory = true): SceneSyncResult {
     const warnings: string[] = [];
 
     if (!state || !Array.isArray(state.entities)) {
       warnings.push('SceneSyncState.entities must be an array; ignoring sync.');
       return { applied: 0, added: 0, updated: 0, removed: 0, warnings };
+    }
+
+    if (recordHistory && (this.currentState.entities.length > 0 || state.entities.length > 0)) {
+      this.history.push(cloneSceneState(this.currentState));
+      if (this.history.length > this.maxHistory) {
+        this.history.shift();
+      }
     }
 
     if (state.preset !== undefined && hooks?.onPreset) {
@@ -188,7 +288,7 @@ export class SceneSync {
     let added = 0;
     let updated = 0;
 
-    if (!this.store) {
+      if (!this.store) {
       // Lightweight mode without WorldStore
       for (const node of sortedNodes) {
         if (this.nameToEntityId.has(node.id)) {
@@ -198,6 +298,7 @@ export class SceneSync {
           added++;
         }
       }
+      this.currentState = cloneSceneState({ ...state, entities: sortedNodes });
       return { applied: added + updated, added, updated, removed, warnings };
     }
 
@@ -228,6 +329,31 @@ export class SceneSync {
         store.geometryTypes[entityId] = GeometryTypeId.Box;
       } else {
         store.geometryTypes[entityId] = mappedType;
+      }
+
+      // Parent-Child Hierarchy
+      if (node.parent !== undefined) {
+        const parentId = this.nameToEntityId.get(node.parent);
+        if (parentId !== undefined && parentId !== entityId) {
+          store.setParent(entityId, parentId);
+        } else {
+          warnings.push(`Unknown or invalid parent "${node.parent}" for "${node.id}"; attaching to root.`);
+          store.setParent(entityId, -1);
+        }
+      } else {
+        store.setParent(entityId, -1);
+      }
+
+      // Light parameters
+      if (mappedType === GeometryTypeId.Light) {
+        const lIdx = entityId * 4;
+        const kind = node.kind ? (LIGHT_KIND_MAP[node.kind] ?? LightKindId.Point) : LightKindId.Point;
+        store.lightParams[lIdx] = kind;
+        store.lightParams[lIdx + 1] =
+          node.intensity !== undefined ? Math.max(0, sanitizeNum(node.intensity, 1.5, `${node.id}.intensity`, warnings)) : 1.5;
+        store.lightParams[lIdx + 2] =
+          node.range !== undefined ? Math.max(0.1, sanitizeNum(node.range, 10, `${node.id}.range`, warnings)) : 10;
+        store.lightParams[lIdx + 3] = node.castShadow === false ? 0 : 1;
       }
 
       // Scale / Size / Radius
@@ -374,6 +500,8 @@ export class SceneSync {
       hooks.onCamera(state.camera, (name) => this.nameToEntityId.get(name), warnings);
     }
 
+    this.currentState = cloneSceneState({ ...state, entities: sortedNodes });
+
     return {
       applied: added + updated,
       added,
@@ -498,4 +626,13 @@ function growFloat32(src: Float32Array, nextLength: number): Float32Array {
   const dst = new Float32Array(nextLength);
   dst.set(src);
   return dst;
+}
+
+function cloneSceneState(state: SceneSyncState): SceneSyncState {
+  return {
+    ...(state.preset !== undefined ? { preset: state.preset } : {}),
+    ...(state.transition !== undefined ? { transition: state.transition } : {}),
+    ...(state.camera !== undefined ? { camera: { ...state.camera } } : {}),
+    entities: state.entities.map((e) => ({ ...e })),
+  };
 }

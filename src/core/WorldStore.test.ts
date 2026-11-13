@@ -1,4 +1,4 @@
-﻿import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { WorldStore, DirtyFlag } from './WorldStore';
 import { SceneSync } from './SceneSync';
 import { EntityHandle } from '../entities/EntityHandle';
@@ -74,9 +74,31 @@ describe('EntityHandle (Schritt 1)', () => {
     expect(store.modelMatrices[mOffset + 13]).toBeCloseTo(7);
   });
 
+  it('propagates parent transforms to child entities in WorldStore', () => {
+    const store = new WorldStore(8);
+    const parentId = store.allocate();
+    const childId = store.allocate();
+    store.setParent(childId, parentId);
+
+    store.positions.set([10, 0, 0], parentId * 3);
+    store.positions.set([2, 3, 0], childId * 3);
+    store.markDirty(parentId, DirtyFlag.Transform);
+    store.updateMatrices();
+
+    expect(store.modelMatrices[childId * 16 + 12]).toBeCloseTo(12);
+    expect(store.modelMatrices[childId * 16 + 13]).toBeCloseTo(3);
+
+    // Move parent again -> child updates automatically
+    store.positions.set([20, 1, 0], parentId * 3);
+    store.markDirty(parentId, DirtyFlag.Transform);
+    store.updateMatrices();
+    expect(store.modelMatrices[childId * 16 + 12]).toBeCloseTo(22);
+    expect(store.modelMatrices[childId * 16 + 13]).toBeCloseTo(4);
+  });
+
   it('creates PrimitiveDescriptor via Box() without Engine instance', () => {
     const desc = Box({ id: 'table', size: [2.4, 0.08, 1.2], position: [0, 0.75, 0] });
-    expect(desc.kind).toBe('primitive-descriptor');
+    expect(desc.__descriptor).toBe('primitive-descriptor');
     expect(desc.type).toBe('box');
     expect(desc.id).toBe('table');
   });

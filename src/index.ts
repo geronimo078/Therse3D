@@ -1,6 +1,6 @@
-﻿export { Engine, type EngineOptions, type EnginePreset, type EnginePlugin, type TickCallback } from './core/Engine';
+export { Engine, type EngineOptions, type EnginePreset, type EnginePlugin, type TickCallback } from './core/Engine';
 export { vec3, quat, mat4, type Vec3, type Quat, type Mat4 } from './core/Math';
-export { WorldStore, DirtyFlag, GeometryTypeId, MAX_ENTITIES_DEFAULT } from './core/WorldStore';
+export { WorldStore, DirtyFlag, GeometryTypeId, LightKindId, MAX_ENTITIES_DEFAULT } from './core/WorldStore';
 export {
   SpatialLayout,
   type SpatialAlign,
@@ -12,6 +12,7 @@ export {
   SceneSync,
   type SceneSyncNode,
   type SceneSyncState,
+  type ScenePatchState,
   type SceneSyncResult,
   type SceneSyncCamera,
   type CameraAnglePreset,
@@ -30,12 +31,15 @@ export {
   Plane,
   Line,
   Model,
+  Group,
+  Light,
   createBoxGeometry,
   createSphereGeometry,
   createCylinderGeometry,
   createPlaneGeometry,
   type PrimitiveOptions,
   type PrimitiveType,
+  type LightKind,
   type PrimitiveDescriptor,
   type GeometryMeshData,
 } from './entities/Primitives';

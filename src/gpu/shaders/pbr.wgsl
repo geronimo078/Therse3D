@@ -1,4 +1,9 @@
-﻿// Standard PBR-Shader + 3-Punkt-Studio-Beleuchtung + Auto-Instancing + ACES Tone-Mapping
+// Standard PBR-Shader + 3-Punkt-Studio-Beleuchtung + Dynamic Lights + Soft Contact Shadows + ACES Tone-Mapping
+
+struct DynamicLight {
+  posOrDir: vec4<f32>,      // xyz = world pos (point) or dir (directional), w = kind (0 = point, 1 = directional)
+  colorIntensity: vec4<f32>, // rgb = color, w = intensity
+};
 
 struct SceneUniforms {
   viewProj: mat4x4<f32>,
@@ -7,6 +12,9 @@ struct SceneUniforms {
   groundColor: vec4<f32>,
   keyLightDir: vec4<f32>,
   keyLightColor: vec4<f32>,
+  counts: vec4<f32>, // x = dynamicLightCount (0..8), y = shadowCasterCount (0..16)
+  lights: array<DynamicLight, 8>,
+  shadowCasters: array<vec4<f32>, 16>, // x = cx, y = minY, z = cz, w = radiusXZ
 };
 
 @group(0) @binding(0) var<uniform> scene: SceneUniforms;
@@ -38,7 +46,6 @@ fn vs_main(in: VertexInput) -> VertexOutput {
   let model = modelMatrices[entityId];
   let worldPos = model * vec4<f32>(in.position, 1.0);
 
-  // Transform normal using upper 3x3 of model matrix (approx for uniform/non-uniform scale)
   let nMat = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
   let worldNormal = normalize(nMat * in.normal);
 
@@ -102,6 +109,29 @@ fn evalLight(
   return (kD * albedo / PI + specular) * radiance * NdotL;
 }
 
+fn computeContactShadow(worldPos: vec3<f32>, N: vec3<f32>) -> f32 {
+  let casterCount = i32(scene.counts.y);
+  if (casterCount <= 0 || N.y < 0.5) {
+    return 1.0;
+  }
+  var shadow: f32 = 1.0;
+  for (var i = 0; i < 16; i++) {
+    if (i >= casterCount) {
+      break;
+    }
+    let c = scene.shadowCasters[i];
+    let dy = c.y - worldPos.y;
+    if (dy >= -0.02 && dy <= 0.35) {
+      let distXZ = length(worldPos.xz - c.xz);
+      let radius = max(c.w, 0.05);
+      let radial = 1.0 - smoothstep(radius * 0.45, radius * 1.35, distXZ);
+      let heightFade = 1.0 - smoothstep(0.0, 0.35, max(dy, 0.0));
+      shadow = min(shadow, 1.0 - radial * heightFade * 0.55);
+    }
+  }
+  return shadow;
+}
+
 fn acesToneMap(x: vec3<f32>) -> vec3<f32> {
   let a = 2.51;
   let b = 0.03;
@@ -130,16 +160,38 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let rimDir = normalize(vec3<f32>(0.2, 0.6, -0.8));
 
   var Lo = vec3<f32>(0.0);
-  Lo += evalLight(N, V, keyDir, scene.keyLightColor.rgb * 2.6, albedo, metalness, roughness, F0);
+  Lo += evalLight(N, V, keyDir, scene.keyLightColor.rgb * 2.4, albedo, metalness, roughness, F0);
   Lo += evalLight(N, V, fillDir, vec3<f32>(0.45, 0.52, 0.65), albedo, metalness, roughness, F0);
   Lo += evalLight(N, V, rimDir, vec3<f32>(0.75, 0.80, 0.90), albedo, metalness, roughness, F0);
+
+  // Dynamic Light Entities (up to 8)
+  let lightCount = i32(scene.counts.x);
+  for (var i = 0; i < 8; i++) {
+    if (i >= lightCount) {
+      break;
+    }
+    let dl = scene.lights[i];
+    let isDir = dl.posOrDir.w > 0.5;
+    if (isDir) {
+      let L = normalize(dl.posOrDir.xyz);
+      Lo += evalLight(N, V, L, dl.colorIntensity.rgb * dl.colorIntensity.w, albedo, metalness, roughness, F0);
+    } else {
+      let toLight = dl.posOrDir.xyz - in.worldPos;
+      let dist = length(toLight);
+      let L = toLight / max(dist, 0.001);
+      let atten = 1.0 / (1.0 + 0.14 * dist + 0.07 * dist * dist);
+      Lo += evalLight(N, V, L, dl.colorIntensity.rgb * dl.colorIntensity.w * atten, albedo, metalness, roughness, F0);
+    }
+  }
+
+  let contactShadow = computeContactShadow(in.worldPos, N);
 
   // Hemisphere Ambient
   let hemiFactor = N.y * 0.5 + 0.5;
   let ambientLight = mix(scene.groundColor.rgb, scene.skyColor.rgb, hemiFactor);
-  let ambient = ambientLight * albedo * (1.0 - metalness * 0.6) * 0.35;
+  let ambient = ambientLight * albedo * (1.0 - metalness * 0.6) * 0.35 * contactShadow;
 
-  let hdr = ambient + Lo + albedo * emissive;
+  let hdr = ambient + Lo * mix(0.45, 1.0, contactShadow) + albedo * emissive;
   let mapped = acesToneMap(hdr);
   let srgb = pow(mapped, vec3<f32>(1.0 / 2.2));
   return vec4<f32>(srgb, baseColor.a);

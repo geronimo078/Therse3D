@@ -1,6 +1,13 @@
-﻿import { GeometryTypeId, WorldStore } from './WorldStore';
+import { GeometryTypeId, LightKindId, WorldStore } from './WorldStore';
 import { SpatialLayout } from './SpatialLayout';
-import { SceneSync, type SceneSyncCamera, type SceneSyncResult, type SceneSyncState } from './SceneSync';
+import {
+  SceneSync,
+  type ScenePatchState,
+  type SceneSyncCamera,
+  type SceneSyncHooks,
+  type SceneSyncResult,
+  type SceneSyncState,
+} from './SceneSync';
 import { GPUDeviceContext } from '../gpu/Device';
 import { Renderer } from '../gpu/Renderer';
 import { Inspector, type SceneDescription } from '../ai/Inspector';
@@ -32,6 +39,8 @@ const PRIMITIVE_TYPE_MAP: Record<PrimitiveType, GeometryTypeId> = {
   plane: GeometryTypeId.Plane,
   line: GeometryTypeId.Line,
   model: GeometryTypeId.Model,
+  group: GeometryTypeId.Group,
+  light: GeometryTypeId.Light,
 };
 
 /**
@@ -153,6 +162,31 @@ export class Engine {
         : mat.emissive;
     this.store.pbrParams[cIdx + 3] = mat.materialId;
 
+    if (descriptor.type === 'light') {
+      this.store.lightParams[cIdx] =
+        descriptor.kind === 'directional'
+          ? LightKindId.Directional
+          : descriptor.kind === 'spot'
+            ? LightKindId.Spot
+            : LightKindId.Point;
+      this.store.lightParams[cIdx + 1] =
+        descriptor.intensity !== undefined && Number.isFinite(descriptor.intensity)
+          ? Math.max(0, descriptor.intensity)
+          : 1.5;
+      this.store.lightParams[cIdx + 2] =
+        descriptor.range !== undefined && Number.isFinite(descriptor.range)
+          ? Math.max(0.1, descriptor.range)
+          : 10;
+      this.store.lightParams[cIdx + 3] = descriptor.castShadow === false ? 0 : 1;
+    }
+
+    if (descriptor.parent) {
+      const parentHandle = this.entitiesByName.get(descriptor.parent);
+      if (parentHandle) {
+        this.store.setParent(id, parentHandle.id);
+      }
+    }
+
     if (descriptor.position) {
       handle.setPosition(
         descriptor.position[0],
@@ -235,8 +269,8 @@ export class Engine {
     return () => this.tickCallbacks.delete(cb);
   }
 
-  sync(state: SceneSyncState): SceneSyncResult {
-    return this.sceneSync.apply(state, {
+  private getSyncHooks(): SceneSyncHooks {
+    return {
       onPreset: (preset, warnings) => {
         const valid: EnginePreset[] = ['studio', 'outdoor', 'dark-ui', 'cad-blueprint', 'minimal'];
         if (valid.includes(preset as EnginePreset)) {
@@ -257,7 +291,19 @@ export class Engine {
         this.entitiesById.delete(entityId);
         this.entitiesByName.delete(name);
       },
-    });
+    };
+  }
+
+  sync(state: SceneSyncState): SceneSyncResult {
+    return this.sceneSync.apply(state, this.getSyncHooks());
+  }
+
+  patch(patchState: ScenePatchState): SceneSyncResult {
+    return this.sceneSync.patch(patchState, this.getSyncHooks());
+  }
+
+  undo(): SceneSyncResult {
+    return this.sceneSync.undo(this.getSyncHooks());
   }
 
   focusCamera(cfg: SceneSyncCamera, warnings: string[] = []): void {
