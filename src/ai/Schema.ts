@@ -1,0 +1,155 @@
+﻿import type { Engine } from '../core/Engine';
+import { MATERIAL_PRESETS } from '../entities/Materials';
+
+/**
+ * Complete JSON Schema for Structured Outputs / Tool Calling with therse3d.
+ */
+export const THERSE3D_SCENE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['entities'],
+  properties: {
+    preset: {
+      type: 'string',
+      enum: ['studio', 'outdoor', 'dark-ui', 'cad-blueprint', 'minimal'],
+    },
+    transition: { type: 'number', minimum: 0 },
+    camera: {
+      type: 'object',
+      properties: {
+        target: {
+          oneOf: [
+            { type: 'string' },
+            { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+          ],
+        },
+        angle: {
+          type: 'string',
+          enum: ['front', 'front-elevated', 'top', 'isometric'],
+        },
+        distance: { type: 'number', minimum: 0.5 },
+      },
+    },
+    entities: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['id', 'type'],
+        properties: {
+          id: { type: 'string' },
+          type: {
+            type: 'string',
+            enum: ['box', 'sphere', 'cylinder', 'plane', 'line', 'model'],
+          },
+          src: { type: 'string' },
+          position: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+          rotation: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 4 },
+          scale: {
+            oneOf: [
+              { type: 'number' },
+              { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+            ],
+          },
+          size: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+          radius: { type: 'number', minimum: 0.001 },
+          color: {
+            oneOf: [
+              { type: 'string' },
+              { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 4 },
+            ],
+          },
+          metalness: { type: 'number', minimum: 0, maximum: 1 },
+          roughness: { type: 'number', minimum: 0.04, maximum: 1 },
+          emissive: { type: 'number', minimum: 0 },
+          visible: { type: 'boolean' },
+          material: {
+            type: 'string',
+            enum: Object.keys(MATERIAL_PRESETS),
+          },
+          on: { type: 'string' },
+          align: {
+            type: 'string',
+            enum: [
+              'center',
+              'front',
+              'back',
+              'left',
+              'right',
+              'front-left',
+              'front-right',
+              'back-left',
+              'back-right',
+            ],
+          },
+          margin: { type: 'number' },
+          offset: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+          lookAt: {
+            oneOf: [
+              { type: 'string' },
+              { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+            ],
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+export const SCENE_SYNC_JSON_SCHEMA = THERSE3D_SCENE_SCHEMA;
+
+export const THERSE3D_TOOL_DEFINITIONS = [
+  {
+    name: 'therse_sync_scene',
+    description: 'Synchronizes the 3D scene declaratively and returns SyncReport + spatial state.',
+    parameters: THERSE3D_SCENE_SCHEMA,
+  },
+  {
+    name: 'therse_inspect',
+    description: 'Returns spatial graph, visibility, screen regions, and collision warnings.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'therse_snapshot',
+    description: 'Captures an annotated RGB snapshot for multimodal VLM visual verification.',
+    parameters: {
+      type: 'object',
+      properties: {
+        resolution: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+      },
+    },
+  },
+  {
+    name: 'therse_camera_focus',
+    description: 'Focuses the camera on a specific entityId or view preset.',
+    parameters: {
+      type: 'object',
+      properties: {
+        target: { type: 'string' },
+        view: { type: 'string', enum: ['top', 'front', 'front-elevated', 'isometric'] },
+        distance: { type: 'number', minimum: 0.5 },
+      },
+    },
+  },
+] as const;
+
+export class Schema {
+  static getPromptContext(app?: Engine): string {
+    const materials = Object.keys(MATERIAL_PRESETS).join(', ');
+    const lines = [
+      'therse3d AI-Native WebGPU 3D Engine',
+      'Primitives: box, sphere, cylinder, plane, line, model',
+      `Materials: ${materials}`,
+      'Layout: on (entityId|"floor"), align (center|front|back|left|right|front-left|front-right|back-left|back-right), margin, offset [dx,dy,dz], lookAt',
+      'Presets: studio, outdoor, dark-ui, cad-blueprint, minimal',
+      'Tools: therse_sync_scene, therse_inspect, therse_snapshot, therse_camera_focus',
+    ];
+
+    if (app) {
+      const desc = app.describe();
+      const ids = desc.entities.map((e) => e.id).join(', ') || '(empty)';
+      lines.push(`Active entities (${desc.entityCount}): ${ids}`);
+    }
+
+    return lines.join('\n');
+  }
+}

@@ -1,0 +1,33 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>therse3d — AI Sync Example</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #141720; color: #e2e8f0; font-family: system-ui, sans-serif; }
+      #status { position: fixed; top: 12px; left: 12px; padding: 8px 12px; background: rgba(15, 23, 42, 0.8); border-radius: 6px; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <div id="status">Initializing WebGPU...</div>
+    <script type="module">
+      import { Engine } from '../src/index.ts';
+
+      const status = document.getElementById('status');
+      try {
+        const app = await Engine.create({ preset: 'studio' });
+        const result = app.sync({
+          entities: [
+            { id: 'table', type: 'box', scale: [3, 0.2, 2], material: 'oak-wood' },
+            { id: 'cup', type: 'cylinder', position: [0.4, 0.4, 0.2], material: 'matte-ceramic' },
+          ],
+        });
+        status.textContent = `Synced: +${result.added} / ~${result.updated} / -${result.removed}`;
+      } catch (err) {
+        status.textContent = err instanceof Error ? err.message : String(err);
+      }
+    </script>
+  </body>
+</html>
+

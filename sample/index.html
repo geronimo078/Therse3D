@@ -1,0 +1,262 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>therse3d — Working 3D Sample</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #10131a;
+        color: #e2e8f0;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      #canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      #hud {
+        position: fixed;
+        top: 14px;
+        left: 14px;
+        width: 340px;
+        max-height: calc(100vh - 28px);
+        overflow-y: auto;
+        padding: 14px;
+        background: rgba(15, 23, 42, 0.86);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 10px;
+        font-size: 13px;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 15px;
+        font-weight: 600;
+        color: #38bdf8;
+      }
+      .sub {
+        margin: 0 0 12px;
+        font-size: 12px;
+        color: #94a3b8;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 10px;
+      }
+      button {
+        cursor: pointer;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        background: rgba(30, 41, 59, 0.9);
+        color: #f8fafc;
+        padding: 6px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+      }
+      button:hover {
+        border-color: #38bdf8;
+        background: rgba(56, 189, 248, 0.16);
+      }
+      #status {
+        font-size: 12px;
+        color: #a5f3fc;
+        margin-bottom: 8px;
+      }
+      #output {
+        margin: 0;
+        padding: 8px;
+        background: rgba(2, 6, 23, 0.7);
+        border-radius: 6px;
+        font-size: 11px;
+        max-height: 200px;
+        overflow: auto;
+        white-space: pre-wrap;
+        color: #cbd5e1;
+      }
+      #snapPreview {
+        margin-top: 8px;
+        width: 100%;
+        border-radius: 6px;
+        border: 1px solid rgba(56, 189, 248, 0.4);
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+
+    <div id="hud">
+      <h1>therse3d — WebGPU 3D Sample</h1>
+      <p class="sub">Drag to orbit · Right-drag / Shift to pan · Scroll to zoom</p>
+
+      <div id="status">Initializing WebGPU...</div>
+
+      <div class="row">
+        <button data-preset="studio">Studio</button>
+        <button data-preset="outdoor">Outdoor</button>
+        <button data-preset="dark-ui">Dark UI</button>
+        <button data-preset="cad-blueprint">CAD</button>
+      </div>
+
+      <div class="row">
+        <button id="btnSync">Sync Layout</button>
+        <button id="btnDescribe">Describe()</button>
+        <button id="btnSnapshot">Snapshot()</button>
+        <button id="btnFit">Fit All</button>
+      </div>
+
+      <pre id="output">Ready.</pre>
+      <img id="snapPreview" alt="Annotated VLM Snapshot" />
+    </div>
+
+    <script type="module">
+      import {
+        Engine,
+        Box,
+        Sphere,
+        Cylinder,
+        Plane,
+        OrbitControls,
+      } from '../src/index.ts';
+
+      const statusEl = document.getElementById('status');
+      const outputEl = document.getElementById('output');
+      const snapPreview = document.getElementById('snapPreview');
+
+      try {
+        const app = await Engine.create('#canvas', {
+          preset: 'studio',
+          autoResize: true,
+        });
+
+        // Build scene with relative SpatialLayout (`on` & `align`)
+        app.add(Plane({
+          id: 'floor',
+          size: [10, 1, 10],
+          position: [0, 0, 0],
+          color: '#222834',
+          roughness: 0.9,
+        }));
+
+        app.add(Box({
+          id: 'table',
+          size: [2.6, 0.14, 1.4],
+          position: [0, 0.8, 0],
+          material: 'oak-wood',
+        }));
+
+        app.add(Box({
+          id: 'leg-left',
+          size: [0.12, 0.73, 1.2],
+          position: [-1.15, 0.365, 0],
+          material: 'brushed-aluminum',
+        }));
+
+        app.add(Box({
+          id: 'leg-right',
+          size: [0.12, 0.73, 1.2],
+          position: [1.15, 0.365, 0],
+          material: 'brushed-aluminum',
+        }));
+
+        const orb = app.add(Sphere({
+          id: 'orb',
+          radius: 0.24,
+          on: 'table',
+          align: 'center',
+          color: '#00aaff',
+          metalness: 0.75,
+          roughness: 0.15,
+        }));
+
+        app.add(Cylinder({
+          id: 'cup',
+          size: [0.18, 0.28, 0.18],
+          on: 'table',
+          align: 'front-right',
+          margin: 0.15,
+          material: 'polished-gold',
+        }));
+
+        app.add(Box({
+          id: 'beacon',
+          size: [0.22, 0.22, 0.22],
+          on: 'table',
+          align: 'back-left',
+          margin: 0.15,
+          material: 'emissive-neon',
+        }));
+
+        app.use(OrbitControls({ distance: 4.5, target: [0, 0.8, 0] }));
+        app.camera.fitAll({ padding: 1.35 });
+
+        const baseOrbY = orb.position[1];
+        app.onTick((_dt, elapsed) => {
+          orb.position[1] = baseOrbY + Math.sin(elapsed * 2.2) * 0.08;
+        });
+
+        statusEl.textContent = `WebGPU active · ${app.describe().entityCount} entities`;
+        outputEl.textContent = Engine.getPromptContext(app);
+
+        // Preset buttons
+        document.querySelectorAll('button[data-preset]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const preset = btn.getAttribute('data-preset');
+            app.renderer.setPreset(preset);
+            statusEl.textContent = `Preset: ${preset}`;
+          });
+        });
+
+        // Declarative app.sync() demo with smooth tweening
+        let toggled = false;
+        document.getElementById('btnSync').addEventListener('click', () => {
+          toggled = !toggled;
+          const report = app.sync({
+            transition: 0.45,
+            entities: [
+              { id: 'floor', type: 'plane', size: [10, 1, 10], position: [0, 0, 0], color: '#222834', roughness: 0.9 },
+              { id: 'table', type: 'box', size: [2.6, 0.14, 1.4], position: [0, 0.8, 0], material: 'oak-wood' },
+              { id: 'leg-left', type: 'box', size: [0.12, 0.73, 1.2], position: [-1.15, 0.365, 0], material: 'brushed-aluminum' },
+              { id: 'leg-right', type: 'box', size: [0.12, 0.73, 1.2], position: [1.15, 0.365, 0], material: 'brushed-aluminum' },
+              { id: 'orb', type: 'sphere', radius: 0.24, on: 'table', align: toggled ? 'left' : 'center', margin: 0.25, color: toggled ? '#ff3366' : '#00aaff', metalness: 0.75, roughness: 0.15 },
+              { id: 'cup', type: 'cylinder', size: [0.18, 0.28, 0.18], on: 'table', align: toggled ? 'back-right' : 'front-right', margin: 0.15, material: 'polished-gold' },
+              { id: 'beacon', type: 'box', size: [0.22, 0.22, 0.22], on: 'table', align: toggled ? 'front-left' : 'back-left', margin: 0.15, material: 'emissive-neon' },
+            ],
+          });
+          outputEl.textContent = JSON.stringify(report, null, 2);
+        });
+
+        document.getElementById('btnDescribe').addEventListener('click', () => {
+          outputEl.textContent = JSON.stringify(app.describe(), null, 2);
+        });
+
+        document.getElementById('btnSnapshot').addEventListener('click', async () => {
+          const snap = await app.snapshot({
+            layers: ['rgb', 'annotated'],
+            resolution: [640, 360],
+          });
+          if (snap.annotatedDataUrl) {
+            snapPreview.src = snap.annotatedDataUrl;
+            snapPreview.style.display = 'block';
+          }
+          outputEl.textContent = `Snapshot captured: ${snap.width}x${snap.height}`;
+        });
+
+        document.getElementById('btnFit').addEventListener('click', () => {
+          app.camera.fitAll({ padding: 1.35 });
+        });
+      } catch (err) {
+        statusEl.textContent = 'WebGPU Error';
+        outputEl.textContent = err instanceof Error ? err.message : String(err);
+      }
+    </script>
+  </body>
+</html>
+

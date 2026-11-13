@@ -1,0 +1,39 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>therse3d — VLM Vision &amp; Spatial Inspector Demo</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #141720; color: #e2e8f0; font-family: system-ui, sans-serif; }
+      #panel { position: fixed; top: 12px; left: 12px; padding: 10px 14px; background: rgba(15, 23, 42, 0.85); border-radius: 8px; font-size: 13px; max-width: 360px; }
+      pre { margin: 8px 0 0; font-size: 11px; white-space: pre-wrap; color: #94a3b8; }
+    </style>
+  </head>
+  <body>
+    <div id="panel">
+      <div><strong>VLM Vision &amp; Spatial Inspector</strong></div>
+      <pre id="output">Initializing WebGPU...</pre>
+    </div>
+    <script type="module">
+      import { Engine, Box, Sphere } from '../src/index.ts';
+
+      const output = document.getElementById('output');
+      try {
+        const app = await Engine.create({ preset: 'studio' });
+        Box(app, { id: 'table', position: [0, 0.5, 0], material: 'oak-wood' });
+        Sphere(app, { id: 'orb', position: [0, 1.1, 0], material: 'brushed-aluminum' });
+
+        const state = app.describe();
+        const snap = await app.snapshot();
+        output.textContent = JSON.stringify({
+          entities: state.entityCount,
+          snapshotSize: [snap.width, snap.height],
+        }, null, 2);
+      } catch (err) {
+        output.textContent = err instanceof Error ? err.message : String(err);
+      }
+    </script>
+  </body>
+</html>
+

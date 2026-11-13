@@ -1,0 +1,378 @@
+﻿import { GeometryTypeId, WorldStore } from './WorldStore';
+import { SpatialLayout } from './SpatialLayout';
+import { SceneSync, type SceneSyncCamera, type SceneSyncResult, type SceneSyncState } from './SceneSync';
+import { GPUDeviceContext } from '../gpu/Device';
+import { Renderer } from '../gpu/Renderer';
+import { Inspector, type SceneDescription } from '../ai/Inspector';
+import { Snapshot, type SnapshotOptions, type SnapshotResult } from '../ai/Snapshot';
+import { Schema } from '../ai/Schema';
+import { EntityHandle } from '../entities/EntityHandle';
+import type { PrimitiveDescriptor, PrimitiveType } from '../entities/Primitives';
+import { parseColor, resolveMaterial } from '../entities/Materials';
+import { Camera } from '../controls/OrbitControls';
+
+export type EnginePreset = 'studio' | 'outdoor' | 'dark-ui' | 'cad-blueprint' | 'minimal';
+
+export interface EngineOptions {
+  canvas?: HTMLCanvasElement | string;
+  preset?: EnginePreset;
+  autoResize?: boolean;
+  antialias?: boolean;
+  maxEntities?: number;
+  onDeviceLost?: (info: GPUDeviceLostInfo) => void;
+}
+
+export type TickCallback = (dt: number, elapsed: number) => void;
+export type EnginePlugin = (engine: Engine) => void | (() => void);
+
+const PRIMITIVE_TYPE_MAP: Record<PrimitiveType, GeometryTypeId> = {
+  box: GeometryTypeId.Box,
+  sphere: GeometryTypeId.Sphere,
+  cylinder: GeometryTypeId.Cylinder,
+  plane: GeometryTypeId.Plane,
+  line: GeometryTypeId.Line,
+  model: GeometryTypeId.Model,
+};
+
+/**
+ * Einstiegspunkt, Lifecycle, Presets, Ticker und Plugin-System für therse3d.
+ */
+export class Engine {
+  readonly store: WorldStore;
+  readonly gpu: GPUDeviceContext;
+  readonly renderer: Renderer;
+  readonly camera: Camera;
+  readonly layout: SpatialLayout;
+  readonly sceneSync: SceneSync;
+  readonly inspector: Inspector;
+  readonly snapshotter: Snapshot;
+  readonly preset: EnginePreset;
+
+  private rafId: number | null = null;
+  private lastTime = 0;
+  private elapsed = 0;
+  private readonly tickCallbacks = new Set<TickCallback>();
+  private readonly entitiesById = new Map<number, EntityHandle>();
+  private readonly entitiesByName = new Map<string, EntityHandle>();
+  private readonly pluginCleanups: Array<() => void> = [];
+
+  private constructor(
+    gpu: GPUDeviceContext,
+    renderer: Renderer,
+    store: WorldStore,
+    preset: EnginePreset,
+  ) {
+    this.gpu = gpu;
+    this.renderer = renderer;
+    this.store = store;
+    this.preset = preset;
+    this.camera = new Camera(this);
+    this.layout = new SpatialLayout();
+    this.sceneSync = new SceneSync(this.store, this.layout);
+    this.inspector = new Inspector(store);
+    this.snapshotter = new Snapshot(renderer);
+  }
+
+  static async create(options?: EngineOptions): Promise<Engine>;
+  static async create(
+    selectorOrCanvas: HTMLCanvasElement | string,
+    options?: Omit<EngineOptions, 'canvas'>,
+  ): Promise<Engine>;
+  static async create(
+    selectorOrOptions?: HTMLCanvasElement | string | EngineOptions,
+    maybeOptions?: Omit<EngineOptions, 'canvas'>,
+  ): Promise<Engine> {
+    let options: EngineOptions;
+    if (typeof selectorOrOptions === 'string' || selectorOrOptions instanceof HTMLCanvasElement) {
+      options = { ...maybeOptions, canvas: selectorOrOptions };
+    } else {
+      options = selectorOrOptions ?? {};
+    }
+
+    const canvas = Engine.resolveCanvas(options.canvas);
+    const gpuInitOptions: { autoResize?: boolean; onDeviceLost?: (info: GPUDeviceLostInfo) => void } = {
+      autoResize: options.autoResize ?? true,
+    };
+    if (options.onDeviceLost !== undefined) {
+      gpuInitOptions.onDeviceLost = options.onDeviceLost;
+    }
+    const gpu = await GPUDeviceContext.init(canvas, gpuInitOptions);
+    const store = new WorldStore(options.maxEntities);
+    const preset = options.preset ?? 'studio';
+    const renderer = new Renderer(gpu, store, preset);
+    const engine = new Engine(gpu, renderer, store, preset);
+    engine.start();
+    return engine;
+  }
+
+  static getPromptContext(app?: Engine): string {
+    return Schema.getPromptContext(app);
+  }
+
+  private static resolveCanvas(target?: HTMLCanvasElement | string): HTMLCanvasElement {
+    if (typeof target === 'string') {
+      const el = document.querySelector<HTMLCanvasElement>(target);
+      if (!el) throw new Error(`Canvas selector "${target}" not found.`);
+      return el;
+    }
+    if (target instanceof HTMLCanvasElement) {
+      return target;
+    }
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.display = 'block';
+    document.body.appendChild(canvas);
+    return canvas;
+  }
+
+  add(descriptor: PrimitiveDescriptor): EntityHandle {
+    const id = this.store.allocate();
+    this.store.geometryTypes[id] = PRIMITIVE_TYPE_MAP[descriptor.type] ?? GeometryTypeId.Box;
+    const handle = new EntityHandle(this.store, id, descriptor.id);
+
+    const mat = resolveMaterial(descriptor.material);
+    const color = descriptor.color !== undefined ? parseColor(descriptor.color) : mat.color;
+    const cIdx = id * 4;
+    this.store.colors[cIdx] = color[0];
+    this.store.colors[cIdx + 1] = color[1];
+    this.store.colors[cIdx + 2] = color[2];
+    this.store.colors[cIdx + 3] = color[3];
+
+    this.store.pbrParams[cIdx] =
+      descriptor.metalness !== undefined && Number.isFinite(descriptor.metalness)
+        ? Math.min(1, Math.max(0, descriptor.metalness))
+        : mat.metalness;
+    this.store.pbrParams[cIdx + 1] =
+      descriptor.roughness !== undefined && Number.isFinite(descriptor.roughness)
+        ? Math.min(1, Math.max(0.04, descriptor.roughness))
+        : mat.roughness;
+    this.store.pbrParams[cIdx + 2] =
+      descriptor.emissive !== undefined && Number.isFinite(descriptor.emissive)
+        ? Math.max(0, descriptor.emissive)
+        : mat.emissive;
+    this.store.pbrParams[cIdx + 3] = mat.materialId;
+
+    if (descriptor.position) {
+      handle.setPosition(
+        descriptor.position[0],
+        descriptor.position[1],
+        descriptor.position[2],
+      );
+    }
+
+    if (descriptor.size) {
+      handle.setScale(descriptor.size[0], descriptor.size[1], descriptor.size[2]);
+    } else if (descriptor.radius !== undefined && Number.isFinite(descriptor.radius)) {
+      const d = descriptor.radius * 2;
+      handle.setScale(d, d, d);
+    } else if (descriptor.scale !== undefined) {
+      handle.scale = descriptor.scale;
+    }
+
+    if (descriptor.visible !== undefined) {
+      handle.visible = descriptor.visible;
+    }
+
+    this.entitiesById.set(id, handle);
+    if (descriptor.id) {
+      this.entitiesByName.set(descriptor.id, handle);
+      this.sceneSync.registerExternalEntity(descriptor.id, id);
+    }
+    this.store.updateMatrices();
+
+    if (
+      descriptor.on !== undefined ||
+      descriptor.offset !== undefined ||
+      descriptor.lookAt !== undefined
+    ) {
+      this.layout.applyPlacement(
+        this.store,
+        id,
+        descriptor,
+        (name) => this.entitiesByName.get(name)?.id,
+      );
+    }
+
+    return handle;
+  }
+
+  get(id: string | number): EntityHandle | undefined {
+    if (typeof id === 'number') {
+      return this.entitiesById.get(id);
+    }
+    return this.entitiesByName.get(id);
+  }
+
+  remove(target: string | number | EntityHandle): boolean {
+    const handle =
+      target instanceof EntityHandle
+        ? target
+        : typeof target === 'number'
+          ? this.entitiesById.get(target)
+          : this.entitiesByName.get(target);
+    if (!handle) return false;
+
+    this.entitiesById.delete(handle.id);
+    if (handle.name) {
+      this.entitiesByName.delete(handle.name);
+      this.sceneSync.unregisterExternalEntity(handle.name);
+    }
+    handle.destroy();
+    return true;
+  }
+
+  use(plugin: EnginePlugin): this {
+    const cleanup = plugin(this);
+    if (typeof cleanup === 'function') {
+      this.pluginCleanups.push(cleanup);
+    }
+    return this;
+  }
+
+  onTick(cb: TickCallback): () => void {
+    this.tickCallbacks.add(cb);
+    return () => this.tickCallbacks.delete(cb);
+  }
+
+  sync(state: SceneSyncState): SceneSyncResult {
+    return this.sceneSync.apply(state, {
+      onPreset: (preset, warnings) => {
+        const valid: EnginePreset[] = ['studio', 'outdoor', 'dark-ui', 'cad-blueprint', 'minimal'];
+        if (valid.includes(preset as EnginePreset)) {
+          this.renderer.setPreset(preset as EnginePreset);
+        } else {
+          warnings.push(`Unknown preset "${preset}"; keeping "${this.preset}".`);
+        }
+      },
+      onCamera: (camCfg, resolveEntityId, warnings) => {
+        this.applySyncCamera(camCfg, resolveEntityId, warnings);
+      },
+      onEntityCreated: (name, entityId) => {
+        const handle = new EntityHandle(this.store, entityId, name);
+        this.entitiesById.set(entityId, handle);
+        this.entitiesByName.set(name, handle);
+      },
+      onEntityRemoved: (name, entityId) => {
+        this.entitiesById.delete(entityId);
+        this.entitiesByName.delete(name);
+      },
+    });
+  }
+
+  focusCamera(cfg: SceneSyncCamera, warnings: string[] = []): void {
+    this.applySyncCamera(cfg, (name) => this.entitiesByName.get(name)?.id, warnings);
+  }
+
+  private applySyncCamera(
+    cfg: SceneSyncCamera,
+    resolveEntityId: (name: string) => number | undefined,
+    warnings: string[],
+  ): void {
+    let tx = 0, ty = 0, tz = 0;
+    if (typeof cfg.target === 'string') {
+      const id = resolveEntityId(cfg.target);
+      if (id !== undefined) {
+        tx = this.store.positions[id * 3] ?? 0;
+        ty = this.store.positions[id * 3 + 1] ?? 0;
+        tz = this.store.positions[id * 3 + 2] ?? 0;
+      } else {
+        warnings.push(`Unknown camera target "${cfg.target}"; targeting origin.`);
+      }
+    } else if (Array.isArray(cfg.target)) {
+      tx = Number.isFinite(cfg.target[0]) ? cfg.target[0] : 0;
+      ty = Number.isFinite(cfg.target[1]) ? cfg.target[1] : 0;
+      tz = Number.isFinite(cfg.target[2]) ? cfg.target[2] : 0;
+    }
+
+    this.camera.target[0] = tx;
+    this.camera.target[1] = ty;
+    this.camera.target[2] = tz;
+
+    const dist = cfg.distance !== undefined && Number.isFinite(cfg.distance) ? Math.max(0.5, cfg.distance) : 4;
+    switch (cfg.angle) {
+      case 'top':
+        this.camera.position[0] = tx;
+        this.camera.position[1] = ty + dist;
+        this.camera.position[2] = tz + 0.01;
+        break;
+      case 'front':
+        this.camera.position[0] = tx;
+        this.camera.position[1] = ty;
+        this.camera.position[2] = tz + dist;
+        break;
+      case 'isometric':
+        this.camera.position[0] = tx + dist * 0.58;
+        this.camera.position[1] = ty + dist * 0.58;
+        this.camera.position[2] = tz + dist * 0.58;
+        break;
+      case 'front-elevated':
+      default:
+        this.camera.position[0] = tx;
+        this.camera.position[1] = ty + dist * 0.45;
+        this.camera.position[2] = tz + dist * 0.9;
+        break;
+    }
+  }
+
+  describe(): SceneDescription {
+    const canvas = this.gpu.canvas;
+    const aspect = Math.max(1, canvas.width) / Math.max(1, canvas.height);
+    const vp = this.camera.updateMatrices(aspect);
+    return this.inspector.describe({
+      viewProjMatrix: vp,
+      resolveName: (id) => this.entitiesById.get(id)?.name,
+    });
+  }
+
+  async snapshot(options?: SnapshotOptions): Promise<SnapshotResult> {
+    return this.snapshotter.capture(
+      options,
+      this.camera,
+      this.inspector,
+      (id) => this.entitiesById.get(id)?.name,
+    );
+  }
+
+  start(): void {
+    if (this.rafId !== null) return;
+    this.lastTime = performance.now();
+    const loop = (now: number) => {
+      const dt = Math.min((now - this.lastTime) / 1000, 0.1);
+      this.lastTime = now;
+      this.elapsed += dt;
+      for (const cb of this.tickCallbacks) {
+        cb(dt, this.elapsed);
+      }
+      this.sceneSync.updateTweens(dt);
+      this.store.updateMatrices();
+      this.renderer.renderFrame(this.camera);
+      this.rafId = requestAnimationFrame(loop);
+    };
+    this.rafId = requestAnimationFrame(loop);
+  }
+
+  stop(): void {
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+  }
+
+  destroy(): void {
+    this.stop();
+    this.tickCallbacks.clear();
+    for (const cleanup of this.pluginCleanups) {
+      cleanup();
+    }
+    this.pluginCleanups.length = 0;
+    this.entitiesById.clear();
+    this.entitiesByName.clear();
+    this.renderer.dispose();
+    this.gpu.dispose();
+  }
+
+  dispose(): void {
+    this.destroy();
+  }
+}

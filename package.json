@@ -1,0 +1,43 @@
+﻿{
+  "name": "therse3d",
+  "version": "0.1.0",
+  "description": "AI-Native WebGPU 3D Engine in TypeScript",
+  "type": "module",
+  "main": "./dist/therse3d.cjs",
+  "module": "./dist/therse3d.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/therse3d.js",
+      "require": "./dist/therse3d.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "webgpu",
+    "3d",
+    "engine",
+    "ecs",
+    "ai",
+    "typescript",
+    "wgsl"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@webgpu/types": "^0.1.51",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.0",
+    "vitest": "^3.0.8"
+  }
+}
+
