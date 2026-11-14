@@ -1,4 +1,4 @@
-﻿# therse3d — AI-Native WebGPU 3D Engine (Master Architecture & Spec)
+# therse3d — AI-Native WebGPU 3D Engine (Master Architecture & Spec)
 
 > **Project Goal:** A high-performance, data-oriented WebGPU 3D engine in TypeScript that is as easy to use as Three.js (`10 lines to first render`), yet optimized from the ground up for **AI code generation (LLMs)**, **AI agents (MCP/tool-use)**, and **Vision-Language Models (VLMs)**.
 

@@ -1,4 +1,4 @@
-﻿// Multi-Pass MRT Shader for Object-ID Picking (r32uint) & Linearized Depth Maps (r32float)
+// Multi-Pass MRT Shader for Object-ID Picking (r32uint) & Linearized Depth Maps (r32float)
 
 struct CaptureUniforms {
   viewProj: mat4x4<f32>,

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * GPU-Buffer & GPU-Texture Resource-Manager mit deterministischer Memory-Freigabe.
  */
 export class BufferManager {

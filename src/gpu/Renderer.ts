@@ -1,9 +1,11 @@
 import type { GPUDeviceContext } from './Device';
+import { mat4 } from '../core/Math';
 import { GeometryTypeId, type WorldStore } from '../core/WorldStore';
 import { BufferManager } from './BufferManager';
 import {
   createBoxGeometry,
   createCylinderGeometry,
+  createLineGeometry,
   createPlaneGeometry,
   createSphereGeometry,
   type GeometryMeshData,
@@ -17,6 +19,7 @@ interface GeometryGpuMesh {
   vertexBuffer: GPUBuffer;
   indexBuffer: GPUBuffer;
   indexCount: number;
+  indexFormat: GPUIndexFormat;
 }
 
 interface PresetLighting {
@@ -83,6 +86,7 @@ export interface CapturePassResult {
 }
 
 const MSAA_SAMPLE_COUNT = 4;
+const SHADOW_MAP_SIZE = 1024;
 
 /**
  * WebGPU Instanced PBR-Renderer mit MSAA (4x), Depth-Buffer & Zero-Allocation Render-Loop.
@@ -96,17 +100,29 @@ export class Renderer {
 
   private preset: EnginePreset;
   private readonly pipeline: GPURenderPipeline;
+  private readonly linePipeline: GPURenderPipeline;
+  private readonly shadowPipeline: GPURenderPipeline;
   private readonly bindGroupLayout: GPUBindGroupLayout;
+  private readonly shadowBindGroupLayout: GPUBindGroupLayout;
   private offscreenPbrPipeline: GPURenderPipeline | null = null;
   private idDepthPipeline: GPURenderPipeline | null = null;
   private idDepthBindGroupLayout: GPUBindGroupLayout | null = null;
   private captureUniformBuffer: GPUBuffer | null = null;
   private readonly captureUniformScratch = new Float32Array(24); // mat4(16) + camPos(4) + nearFar(4)
   private readonly meshes = new Map<GeometryTypeId, GeometryGpuMesh>();
+  private readonly customMeshes = new Map<number, GeometryGpuMesh>();
+  private nextCustomMeshId = 1;
 
   private readonly uniformBuffer: GPUBuffer;
-  // mat4(16) + 5*vec4(20) + counts(4) + 8*DynamicLight(64) + 16*vec4 shadowCasters(64) = 168 floats
-  private readonly uniformScratch = new Float32Array(168);
+  // mat4(16) + 5*vec4(20) + counts(4) + 8*DynamicLight(64) + 16*vec4 shadowCasters(64) + lightViewProj(16) = 184 floats
+  private readonly uniformScratch = new Float32Array(184);
+  private readonly lightViewScratch = new Float32Array(16);
+  private readonly lightProjScratch = new Float32Array(16);
+  private readonly lightViewProjScratch = new Float32Array(16);
+
+  private readonly shadowTexture: GPUTexture;
+  private readonly shadowView: GPUTextureView;
+  private readonly shadowSampler: GPUSampler;
 
   private allocatedCapacity = 0;
   private modelBuffer!: GPUBuffer;
@@ -114,6 +130,7 @@ export class Renderer {
   private pbrBuffer!: GPUBuffer;
   private instanceIdBuffer!: GPUBuffer;
   private bindGroup!: GPUBindGroup;
+  private shadowBindGroup!: GPUBindGroup;
 
   // Pre-allocated CPU scratch buffers for zero-allocation instancing bucketing
   private readonly bucketCounts = new Uint32Array(8);
@@ -139,6 +156,20 @@ export class Renderer {
 
     this.uniformBuffer = this.buffers.createUniformBuffer(this.uniformScratch.byteLength, 'scene-uniforms');
 
+    this.shadowTexture = this.buffers.createTexture({
+      label: 'directional-shadow-map',
+      size: [SHADOW_MAP_SIZE, SHADOW_MAP_SIZE],
+      format: 'depth24plus',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.shadowView = this.shadowTexture.createView();
+    this.shadowSampler = gpu.device.createSampler({
+      label: 'shadow-sampler',
+      compare: 'less',
+      magFilter: 'linear',
+      minFilter: 'linear',
+    });
+
     this.bindGroupLayout = gpu.device.createBindGroupLayout({
       label: 'pbr-bind-group-layout',
       entries: [
@@ -146,6 +177,17 @@ export class Renderer {
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
         { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+        { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
+        { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
+      ],
+    });
+
+    this.shadowBindGroupLayout = gpu.device.createBindGroupLayout({
+      label: 'shadow-bind-group-layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
@@ -191,10 +233,74 @@ export class Renderer {
       },
     });
 
+    this.linePipeline = gpu.device.createRenderPipeline({
+      label: 'line-instanced-pipeline',
+      layout: gpu.device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] }),
+      vertex: {
+        module: shaderModule,
+        entryPoint: 'vs_main',
+        buffers: [
+          {
+            arrayStride: 8 * 4,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 3 * 4, format: 'float32x3' },
+              { shaderLocation: 2, offset: 6 * 4, format: 'float32x2' },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: 'fs_unlit',
+        targets: [{ format: gpu.format }],
+      },
+      primitive: {
+        topology: 'line-list',
+      },
+      depthStencil: {
+        format: 'depth24plus',
+        depthWriteEnabled: true,
+        depthCompare: 'less',
+      },
+      multisample: {
+        count: MSAA_SAMPLE_COUNT,
+      },
+    });
+
+    this.shadowPipeline = gpu.device.createRenderPipeline({
+      label: 'shadow-map-pipeline',
+      layout: gpu.device.createPipelineLayout({ bindGroupLayouts: [this.shadowBindGroupLayout] }),
+      vertex: {
+        module: shaderModule,
+        entryPoint: 'vs_shadow',
+        buffers: [
+          {
+            arrayStride: 8 * 4,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 3 * 4, format: 'float32x3' },
+              { shaderLocation: 2, offset: 6 * 4, format: 'float32x2' },
+            ],
+          },
+        ],
+      },
+      primitive: {
+        topology: 'triangle-list',
+        cullMode: 'back',
+      },
+      depthStencil: {
+        format: 'depth24plus',
+        depthWriteEnabled: true,
+        depthCompare: 'less',
+      },
+    });
+
     this.uploadPrimitiveMesh(GeometryTypeId.Box, createBoxGeometry(), 'box');
     this.uploadPrimitiveMesh(GeometryTypeId.Sphere, createSphereGeometry(), 'sphere');
     this.uploadPrimitiveMesh(GeometryTypeId.Cylinder, createCylinderGeometry(), 'cylinder');
     this.uploadPrimitiveMesh(GeometryTypeId.Plane, createPlaneGeometry(), 'plane');
+    this.uploadPrimitiveMesh(GeometryTypeId.Line, createLineGeometry(), 'line');
 
     this.ensureStorageCapacity(store.capacity);
   }
@@ -210,7 +316,29 @@ export class Renderer {
       vertexBuffer,
       indexBuffer,
       indexCount: data.indices.length,
+      indexFormat: data.indices instanceof Uint32Array ? 'uint32' : 'uint16',
     });
+  }
+
+  registerMesh(data: GeometryMeshData, label = 'custom-mesh'): number {
+    const id = this.nextCustomMeshId++;
+    const vertexBuffer = this.buffers.createVertexBuffer(data.vertices, `${label}-${id}-vb`);
+    const indexBuffer = this.buffers.createIndexBuffer(data.indices, `${label}-${id}-ib`);
+    this.customMeshes.set(id, {
+      vertexBuffer,
+      indexBuffer,
+      indexCount: data.indices.length,
+      indexFormat: data.indices instanceof Uint32Array ? 'uint32' : 'uint16',
+    });
+    return id;
+  }
+
+  unloadMesh(meshId: number): void {
+    const mesh = this.customMeshes.get(meshId);
+    if (!mesh) return;
+    this.buffers.destroyBuffer(mesh.vertexBuffer);
+    this.buffers.destroyBuffer(mesh.indexBuffer);
+    this.customMeshes.delete(meshId);
   }
 
   private ensureStorageCapacity(capacity: number): void {
@@ -239,6 +367,18 @@ export class Renderer {
         { binding: 1, resource: { buffer: this.modelBuffer } },
         { binding: 2, resource: { buffer: this.colorBuffer } },
         { binding: 3, resource: { buffer: this.pbrBuffer } },
+        { binding: 4, resource: { buffer: this.instanceIdBuffer } },
+        { binding: 5, resource: this.shadowView },
+        { binding: 6, resource: this.shadowSampler },
+      ],
+    });
+
+    this.shadowBindGroup = this.gpu.device.createBindGroup({
+      label: 'shadow-bind-group',
+      layout: this.shadowBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer } },
+        { binding: 1, resource: { buffer: this.modelBuffer } },
         { binding: 4, resource: { buffer: this.instanceIdBuffer } },
       ],
     });
@@ -278,8 +418,9 @@ export class Renderer {
     if (this.gpu.isLost) return;
 
     const canvas = this.gpu.canvas;
-    const width = Math.max(1, canvas.width);
-    const height = Math.max(1, canvas.height);
+    if (canvas.width === 0 || canvas.height === 0) return;
+    const width = canvas.width;
+    const height = canvas.height;
 
     this.ensureRenderTargets(width, height);
     this.ensureStorageCapacity(this.store.capacity);
@@ -392,9 +533,11 @@ export class Renderer {
     u[37] = shadowCasterCount;
     u[38] = 0;
     u[39] = 0;
+    this.writeLightViewProj(presetCfg.keyLightDir);
     this.buffers.writeBuffer(this.uniformBuffer, u);
 
     const encoder = this.gpu.device.createCommandEncoder();
+    this.recordShadowPass(encoder, counts, offsets);
     const resolveView = this.gpu.context.getCurrentTexture().createView();
 
     const pass = encoder.beginRenderPass({
@@ -417,7 +560,61 @@ export class Renderer {
 
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
+    this.drawPbrMeshes(pass, counts, offsets);
 
+    const lineCount = counts[GeometryTypeId.Line] ?? 0;
+    if (lineCount > 0) {
+      const lineMesh = this.meshes.get(GeometryTypeId.Line);
+      if (lineMesh) {
+        pass.setPipeline(this.linePipeline);
+        pass.setBindGroup(0, this.bindGroup);
+        pass.setVertexBuffer(0, lineMesh.vertexBuffer);
+        pass.setIndexBuffer(lineMesh.indexBuffer, lineMesh.indexFormat);
+        pass.drawIndexed(lineMesh.indexCount, lineCount, 0, 0, offsets[GeometryTypeId.Line] ?? 0);
+      }
+    }
+
+    pass.end();
+    this.gpu.device.queue.submit([encoder.finish()]);
+  }
+
+  private writeLightViewProj(keyLightDir: readonly [number, number, number, number]): void {
+    const lx = keyLightDir[0] ?? 0.5;
+    const ly = keyLightDir[1] ?? 0.85;
+    const lz = keyLightDir[2] ?? 0.45;
+    const len = Math.max(1e-4, Math.hypot(lx, ly, lz));
+    const dist = 18;
+    mat4.lookAt(
+      this.lightViewScratch,
+      (lx / len) * dist,
+      (ly / len) * dist,
+      (lz / len) * dist,
+      0,
+      0,
+      0,
+    );
+    mat4.ortho(this.lightProjScratch, -10, 10, -10, 10, 1, 45);
+    mat4.multiply(this.lightViewProjScratch, this.lightProjScratch, this.lightViewScratch);
+    this.uniformScratch.set(this.lightViewProjScratch, 168);
+  }
+
+  private recordShadowPass(encoder: GPUCommandEncoder, counts: Uint32Array, offsets: Uint32Array): void {
+    const shadowPass = encoder.beginRenderPass({
+      depthStencilAttachment: {
+        view: this.shadowView,
+        depthClearValue: 1.0,
+        depthLoadOp: 'clear',
+        depthStoreOp: 'store',
+      },
+      colorAttachments: [],
+    });
+    shadowPass.setPipeline(this.shadowPipeline);
+    shadowPass.setBindGroup(0, this.shadowBindGroup);
+    this.drawPbrMeshes(shadowPass, counts, offsets);
+    shadowPass.end();
+  }
+
+  private drawPbrMeshes(pass: GPURenderPassEncoder, counts: Uint32Array, offsets: Uint32Array): void {
     for (let i = 0; i < MESH_TYPES.length; i++) {
       const gType = MESH_TYPES[i]!;
       const count = counts[gType] ?? 0;
@@ -426,12 +623,27 @@ export class Renderer {
       if (!mesh) continue;
 
       pass.setVertexBuffer(0, mesh.vertexBuffer);
-      pass.setIndexBuffer(mesh.indexBuffer, 'uint16');
+      pass.setIndexBuffer(mesh.indexBuffer, mesh.indexFormat);
       pass.drawIndexed(mesh.indexCount, count, 0, 0, offsets[gType] ?? 0);
     }
 
-    pass.end();
-    this.gpu.device.queue.submit([encoder.finish()]);
+    const modelCount = counts[GeometryTypeId.Model] ?? 0;
+    if (modelCount > 0 && this.customMeshes.size > 0) {
+      const modelOffset = offsets[GeometryTypeId.Model] ?? 0;
+      const packed = this.packedInstanceIds;
+      const meshIds = this.store.meshIds;
+      for (let i = 0; i < modelCount; i++) {
+        const slot = modelOffset + i;
+        const entityId = packed[slot]!;
+        const meshId = meshIds[entityId] ?? -1;
+        if (meshId < 0) continue;
+        const mesh = this.customMeshes.get(meshId);
+        if (!mesh) continue;
+        pass.setVertexBuffer(0, mesh.vertexBuffer);
+        pass.setIndexBuffer(mesh.indexBuffer, mesh.indexFormat);
+        pass.drawIndexed(mesh.indexCount, 1, 0, 0, slot);
+      }
+    }
   }
 
   private ensureCapturePipelines(): void {
@@ -635,6 +847,7 @@ export class Renderer {
     u[37] = shadowCasterCount;
     u[38] = 0;
     u[39] = 0;
+    this.writeLightViewProj(presetCfg.keyLightDir);
     this.buffers.writeBuffer(this.uniformBuffer, u);
     this.buffers.writeBuffer(this.captureUniformBuffer!, cu);
 
@@ -659,6 +872,7 @@ export class Renderer {
       const encoder = device.createCommandEncoder();
 
       if (needRgb) {
+        this.recordShadowPass(encoder, counts, offsets);
         rgbTex = this.buffers.createTexture({
           label: 'capture-rgb',
           size: [width, height],
@@ -677,16 +891,7 @@ export class Renderer {
         });
         pass.setPipeline(this.offscreenPbrPipeline!);
         pass.setBindGroup(0, this.bindGroup);
-        for (let i = 0; i < MESH_TYPES.length; i++) {
-          const gType = MESH_TYPES[i]!;
-          const count = counts[gType] ?? 0;
-          if (count === 0) continue;
-          const mesh = this.meshes.get(gType);
-          if (!mesh) continue;
-          pass.setVertexBuffer(0, mesh.vertexBuffer);
-          pass.setIndexBuffer(mesh.indexBuffer, 'uint16');
-          pass.drawIndexed(mesh.indexCount, count, 0, 0, offsets[gType] ?? 0);
-        }
+        this.drawPbrMeshes(pass, counts, offsets);
         pass.end();
         encoder.copyTextureToBuffer({ texture: rgbTex }, { buffer: rgbReadBuf, bytesPerRow }, { width, height });
       }
@@ -723,16 +928,7 @@ export class Renderer {
         });
         pass.setPipeline(this.idDepthPipeline!);
         pass.setBindGroup(0, idBindGroup);
-        for (let i = 0; i < MESH_TYPES.length; i++) {
-          const gType = MESH_TYPES[i]!;
-          const count = counts[gType] ?? 0;
-          if (count === 0) continue;
-          const mesh = this.meshes.get(gType);
-          if (!mesh) continue;
-          pass.setVertexBuffer(0, mesh.vertexBuffer);
-          pass.setIndexBuffer(mesh.indexBuffer, 'uint16');
-          pass.drawIndexed(mesh.indexCount, count, 0, 0, offsets[gType] ?? 0);
-        }
+        this.drawPbrMeshes(pass, counts, offsets);
         pass.end();
 
         if (needIds) {

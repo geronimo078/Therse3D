@@ -1,4 +1,4 @@
-﻿// Compute-Sort & Quad-Rendering für 3D Gaussian Splatting
+// Compute-Sort & Quad-Rendering für 3D Gaussian Splatting
 
 struct SplatVertexOutput {
   @builtin(position) clip_position: vec4<f32>,

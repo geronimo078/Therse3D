@@ -43,6 +43,9 @@ export const THERSE3D_SCENE_SCHEMA = {
           },
           parent: { type: 'string' },
           src: { type: 'string' },
+          url: { type: 'string' },
+          from: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+          to: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
           kind: { type: 'string', enum: ['point', 'directional', 'spot'] },
           intensity: { type: 'number', minimum: 0 },
           range: { type: 'number', minimum: 0.1 },
@@ -72,6 +75,10 @@ export const THERSE3D_SCENE_SCHEMA = {
             enum: Object.keys(MATERIAL_PRESETS),
           },
           on: { type: 'string' },
+          beside: { type: 'string' },
+          side: { type: 'string', enum: ['left', 'right', 'front', 'back'] },
+          inside: { type: 'string' },
+          avoidOverlap: { type: 'boolean' },
           align: {
             type: 'string',
             enum: [
@@ -94,6 +101,22 @@ export const THERSE3D_SCENE_SCHEMA = {
               { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
             ],
           },
+        },
+      },
+    },
+    layouts: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['kind', 'entities'],
+        properties: {
+          kind: { type: 'string', enum: ['grid', 'ring', 'row'] },
+          entities: { type: 'array', items: { type: 'string' } },
+          center: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+          radius: { type: 'number', minimum: 0.2 },
+          spacing: { type: 'number', minimum: 0.1 },
+          columns: { type: 'number', minimum: 1 },
+          lookAtCenter: { type: 'boolean' },
         },
       },
     },
@@ -153,6 +176,18 @@ export const THERSE3D_TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    name: 'therse_pick',
+    description: 'Picks the 3D entity at normalized screen coordinates (nx, ny in [0..1]).',
+    parameters: {
+      type: 'object',
+      required: ['x', 'y'],
+      properties: {
+        x: { type: 'number', minimum: 0, maximum: 1 },
+        y: { type: 'number', minimum: 0, maximum: 1 },
+      },
+    },
+  },
 ] as const;
 
 export class Schema {
@@ -162,9 +197,9 @@ export class Schema {
       'therse3d AI-Native WebGPU 3D Engine',
       'Primitives: box, sphere, cylinder, plane, line, model, group, light',
       `Materials: ${materials}`,
-      'Hierarchy & Layout: parent (entityId), on (entityId|"floor"), align (center|front|back|left|right|front-left|front-right|back-left|back-right), margin, offset [dx,dy,dz], lookAt',
+      'Hierarchy & Layout: parent, on (entityId|"floor"), beside (entityId + side: left|right|front|back), inside (entityId), avoidOverlap, align, margin, offset [dx,dy,dz], lookAt, layouts (grid|ring|row)',
       'Presets: studio, outdoor, dark-ui, cad-blueprint, minimal',
-      'Tools: therse_sync_scene, therse_patch_scene, therse_undo, therse_inspect, therse_snapshot, therse_camera_focus',
+      'Tools: therse_sync_scene, therse_patch_scene, therse_undo, therse_inspect, therse_snapshot, therse_camera_focus, therse_pick',
     ];
 
     if (app) {

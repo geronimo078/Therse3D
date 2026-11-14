@@ -1,4 +1,4 @@
-﻿import type { MaterialDefinition } from './Materials';
+import type { MaterialDefinition } from './Materials';
 
 export interface GltfParsedMesh {
   name: string;

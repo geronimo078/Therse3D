@@ -1,4 +1,4 @@
-﻿# therse3d
+# therse3d
 
 **An AI-Native WebGPU 3D Engine in TypeScript.**
 

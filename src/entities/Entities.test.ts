@@ -1,10 +1,13 @@
-﻿import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
+  applyLineEndpoints,
   createBoxGeometry,
   createCylinderGeometry,
+  createLineGeometry,
   createPlaneGeometry,
   createSphereGeometry,
 } from './Primitives';
+import { WorldStore } from '../core/WorldStore';
 import { parseColor, resolveMaterial } from './Materials';
 
 describe('Procedural Primitives (Schritt 2)', () => {
@@ -24,6 +27,20 @@ describe('Procedural Primitives (Schritt 2)', () => {
     const plane = createPlaneGeometry();
     expect(plane.vertices.length).toBe(4 * 8);
     expect(plane.indices.length).toBe(6);
+
+    const line = createLineGeometry();
+    expect(line.vertices.length).toBe(2 * 8);
+    expect(line.indices.length).toBe(2);
+  });
+
+  it('computes midpoint, length scale, and orientation for Line endpoints', () => {
+    const store = new WorldStore(4);
+    const id = store.allocate();
+    applyLineEndpoints(store, id, [0, 0, 0], [3, 0, 4]);
+    expect(store.positions[id * 3]).toBeCloseTo(1.5);
+    expect(store.positions[id * 3 + 1]).toBeCloseTo(0);
+    expect(store.positions[id * 3 + 2]).toBeCloseTo(2);
+    expect(store.scales[id * 3 + 2]).toBeCloseTo(5);
   });
 });
 

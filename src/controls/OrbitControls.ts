@@ -1,4 +1,4 @@
-﻿import type { Engine, EnginePlugin } from '../core/Engine';
+import type { Engine, EnginePlugin } from '../core/Engine';
 import { mat4 } from '../core/Math';
 
 export interface OrbitControlsOptions {
@@ -28,9 +28,21 @@ export class Camera {
   far = 500;
 
   private readonly engine: Engine;
+  private readonly changeListeners = new Set<() => void>();
 
   constructor(engine: Engine) {
     this.engine = engine;
+  }
+
+  onChange(cb: () => void): () => void {
+    this.changeListeners.add(cb);
+    return () => this.changeListeners.delete(cb);
+  }
+
+  notifyChanged(): void {
+    for (const cb of this.changeListeners) {
+      cb();
+    }
   }
 
   fitAll(options: FitAllOptions = {}): void {
@@ -61,6 +73,7 @@ export class Camera {
     if (!found) {
       this.target[0] = 0; this.target[1] = 0; this.target[2] = 0;
       this.position[0] = 0; this.position[1] = 2.2; this.position[2] = 5.0;
+      this.notifyChanged();
       return;
     }
 
@@ -77,6 +90,7 @@ export class Camera {
     this.position[0] = cx + dist * 0.55;
     this.position[1] = cy + dist * 0.45;
     this.position[2] = cz + dist * 0.70;
+    this.notifyChanged();
   }
 
   updateMatrices(aspect: number): Float32Array {
@@ -132,6 +146,7 @@ export class OrbitControlsController {
 
   private readonly engine: Engine;
   private readonly unsubTick: () => void;
+  private readonly unsubCam: () => void;
 
   constructor(engine: Engine, options: OrbitControlsOptions = {}) {
     this.engine = engine;
@@ -158,7 +173,25 @@ export class OrbitControlsController {
     canvas.addEventListener('contextmenu', this.onContextMenu);
 
     this.unsubTick = engine.onTick(() => this.update());
+    this.unsubCam = engine.camera.onChange(() => this.syncFromCamera());
     this.syncCameraPosition();
+  }
+
+  syncFromCamera(): void {
+    const cam = this.engine.camera;
+    const dx = (cam.position[0] ?? 0) - (cam.target[0] ?? 0);
+    const dy = (cam.position[1] ?? 0) - (cam.target[1] ?? 0);
+    const dz = (cam.position[2] ?? 0) - (cam.target[2] ?? 0);
+    const dist = Math.max(0.5, Math.hypot(dx, dy, dz));
+    const phi = Math.acos(Math.min(1, Math.max(-1, dy / dist)));
+    const theta = Math.atan2(dx, dz);
+
+    this.distance = dist;
+    this.targetDistance = dist;
+    this.phi = Math.min(Math.PI - 0.05, Math.max(0.05, phi));
+    this.targetPhi = this.phi;
+    this.theta = theta;
+    this.targetTheta = theta;
   }
 
   private onContextMenu = (e: MouseEvent): void => {
@@ -232,6 +265,7 @@ export class OrbitControlsController {
 
   dispose(): void {
     this.unsubTick();
+    this.unsubCam();
     const canvas = this.engine.gpu.canvas;
     canvas.removeEventListener('pointerdown', this.onPointerDown);
     window.removeEventListener('pointermove', this.onPointerMove);

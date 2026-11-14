@@ -50,6 +50,7 @@ export class WorldStore {
   alive: Uint8Array;
   geometryTypes: Uint8Array;
   parentIds: Int32Array;
+  meshIds: Int32Array;
 
   private readonly freeList: number[] = [];
   private readonly localMatScratch = new Float32Array(16);
@@ -72,6 +73,8 @@ export class WorldStore {
     this.geometryTypes = new Uint8Array(this.capacity);
     this.parentIds = new Int32Array(this.capacity);
     this.parentIds.fill(-1);
+    this.meshIds = new Int32Array(this.capacity);
+    this.meshIds.fill(-1);
     this.updatedThisPass = new Uint8Array(this.capacity);
   }
 
@@ -118,6 +121,7 @@ export class WorldStore {
     this.lightParams[cIdx + 3] = 1.0;  // castShadow
 
     this.parentIds[id] = -1;
+    this.meshIds[id] = -1;
 
     mat4.identity(this.modelMatrices, id * 16);
     aabb.fromCenterHalfExtents(this.boundsMin, this.boundsMax, pIdx, 0, 0, 0, 0.5, 0.5, 0.5);
@@ -133,6 +137,7 @@ export class WorldStore {
     this.visible[id] = 0;
     this.dirtyFlags[id] = DirtyFlag.None;
     this.parentIds[id] = -1;
+    this.meshIds[id] = -1;
     this.count--;
     this.freeList.push(id);
   }
@@ -311,6 +316,12 @@ export class WorldStore {
     nextParents.fill(-1);
     nextParents.set(this.parentIds);
     this.parentIds = nextParents;
+
+    const nextMeshIds = new Int32Array(nextCap);
+    nextMeshIds.fill(-1);
+    nextMeshIds.set(this.meshIds);
+    this.meshIds = nextMeshIds;
+
     this.updatedThisPass = new Uint8Array(nextCap);
 
     this.capacity = nextCap;

@@ -1,5 +1,7 @@
 import type { Engine } from '../core/Engine';
+import { quat } from '../core/Math';
 import type { SpatialPlacement } from '../core/SpatialLayout';
+import { DirtyFlag, type WorldStore } from '../core/WorldStore';
 import type { EntityHandle } from './EntityHandle';
 import type { MaterialDefinition, MaterialPresetName } from './Materials';
 
@@ -24,6 +26,10 @@ export interface PrimitiveOptions extends SpatialPlacement {
   intensity?: number;
   range?: number;
   castShadow?: boolean;
+  from?: [number, number, number];
+  to?: [number, number, number];
+  url?: string;
+  mesh?: GeometryMeshData;
 }
 
 export interface PrimitiveDescriptor extends PrimitiveOptions {
@@ -34,7 +40,7 @@ export interface PrimitiveDescriptor extends PrimitiveOptions {
 export interface GeometryMeshData {
   /** Interleaved: [px, py, pz, nx, ny, nz, u, v] = 8 floats/vertex */
   vertices: Float32Array;
-  indices: Uint16Array;
+  indices: Uint16Array | Uint32Array;
 }
 
 function makeFactory(type: PrimitiveType) {
@@ -270,4 +276,47 @@ export function createPlaneGeometry(): GeometryMeshData {
   // prettier-ignore
   const indices = new Uint16Array([0, 1, 2, 0, 2, 3]);
   return { vertices, indices };
+}
+
+/**
+ * Prozeduraler Unit-Line-Generator (Länge 1.0 entlang Z-Achse von -0.5 bis +0.5).
+ */
+export function createLineGeometry(): GeometryMeshData {
+  // prettier-ignore
+  const vertices = new Float32Array([
+    0, 0, -0.5,  0, 1, 0,  0, 0,
+    0, 0,  0.5,  0, 1, 0,  1, 0,
+  ]);
+  const indices = new Uint16Array([0, 1]);
+  return { vertices, indices };
+}
+
+/**
+ * Berechnet Position, Rotation und Skalierung eines Line-Primitives aus Start- und Endpunkt.
+ */
+export function applyLineEndpoints(
+  store: WorldStore,
+  entityId: number,
+  from: readonly [number, number, number],
+  to: readonly [number, number, number],
+): void {
+  const fx = Number.isFinite(from[0]) ? from[0] : 0;
+  const fy = Number.isFinite(from[1]) ? from[1] : 0;
+  const fz = Number.isFinite(from[2]) ? from[2] : 0;
+  const tx = Number.isFinite(to[0]) ? to[0] : 0;
+  const ty = Number.isFinite(to[1]) ? to[1] : 0;
+  const tz = Number.isFinite(to[2]) ? to[2] : 0;
+
+  const pIdx = entityId * 3;
+  store.positions[pIdx] = (fx + tx) * 0.5;
+  store.positions[pIdx + 1] = (fy + ty) * 0.5;
+  store.positions[pIdx + 2] = (fz + tz) * 0.5;
+
+  const len = Math.hypot(tx - fx, ty - fy, tz - fz);
+  store.scales[pIdx] = 1;
+  store.scales[pIdx + 1] = 1;
+  store.scales[pIdx + 2] = Math.max(len, 1e-4);
+
+  quat.fromLookAt(store.rotations, entityId * 4, fx, fy, fz, tx, ty, tz);
+  store.markDirty(entityId, DirtyFlag.Transform | DirtyFlag.Bounds);
 }

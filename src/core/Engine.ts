@@ -10,11 +10,23 @@ import {
 } from './SceneSync';
 import { GPUDeviceContext } from '../gpu/Device';
 import { Renderer } from '../gpu/Renderer';
-import { Inspector, type SceneDescription } from '../ai/Inspector';
+import {
+  Inspector,
+  pickFromScreen,
+  raycastStore,
+  type RaycastHit,
+  type SceneDescription,
+} from '../ai/Inspector';
 import { Snapshot, type SnapshotOptions, type SnapshotResult } from '../ai/Snapshot';
 import { Schema } from '../ai/Schema';
 import { EntityHandle } from '../entities/EntityHandle';
-import type { PrimitiveDescriptor, PrimitiveType } from '../entities/Primitives';
+import { GltfLoader } from '../entities/GltfLoader';
+import {
+  applyLineEndpoints,
+  type GeometryMeshData,
+  type PrimitiveDescriptor,
+  type PrimitiveType,
+} from '../entities/Primitives';
 import { parseColor, resolveMaterial } from '../entities/Materials';
 import { Camera } from '../controls/OrbitControls';
 
@@ -64,6 +76,8 @@ export class Engine {
   private readonly entitiesById = new Map<number, EntityHandle>();
   private readonly entitiesByName = new Map<string, EntityHandle>();
   private readonly pluginCleanups: Array<() => void> = [];
+  private readonly gltfLoader = new GltfLoader();
+  private readonly modelCache = new Map<string, number>();
 
   private constructor(
     gpu: GPUDeviceContext,
@@ -208,6 +222,14 @@ export class Engine {
       handle.visible = descriptor.visible;
     }
 
+    if (descriptor.type === 'line' && descriptor.from && descriptor.to) {
+      applyLineEndpoints(this.store, id, descriptor.from, descriptor.to);
+    }
+
+    if (descriptor.type === 'model') {
+      this.applyModelRef(id, descriptor.url, descriptor.mesh);
+    }
+
     this.entitiesById.set(id, handle);
     if (descriptor.id) {
       this.entitiesByName.set(descriptor.id, handle);
@@ -217,8 +239,11 @@ export class Engine {
 
     if (
       descriptor.on !== undefined ||
+      descriptor.beside !== undefined ||
+      descriptor.inside !== undefined ||
       descriptor.offset !== undefined ||
-      descriptor.lookAt !== undefined
+      descriptor.lookAt !== undefined ||
+      descriptor.avoidOverlap === true
     ) {
       this.layout.applyPlacement(
         this.store,
@@ -291,7 +316,58 @@ export class Engine {
         this.entitiesById.delete(entityId);
         this.entitiesByName.delete(name);
       },
+      onModelRef: (entityId, url, mesh, warnings) => {
+        this.applyModelRef(entityId, url, mesh, warnings);
+      },
     };
+  }
+
+  async loadModel(url: string): Promise<number> {
+    const cached = this.modelCache.get(url);
+    if (cached !== undefined) return cached;
+
+    const result = await this.gltfLoader.load(url);
+    const firstMesh = result.meshes[0];
+    if (!firstMesh) {
+      throw new Error(`No renderable mesh found in glTF model "${url}": ${result.warnings.join('; ')}`);
+    }
+    const meshId = this.renderer.registerMesh(
+      { vertices: firstMesh.vertices, indices: firstMesh.indices },
+      firstMesh.name || url,
+    );
+    this.modelCache.set(url, meshId);
+    return meshId;
+  }
+
+  private applyModelRef(
+    entityId: number,
+    url?: string,
+    mesh?: GeometryMeshData,
+    warnings?: string[],
+  ): void {
+    if (mesh) {
+      this.store.meshIds[entityId] = this.renderer.registerMesh(mesh, `entity-${entityId}-mesh`);
+      return;
+    }
+    if (!url) return;
+
+    const cached = this.modelCache.get(url);
+    if (cached !== undefined) {
+      this.store.meshIds[entityId] = cached;
+      return;
+    }
+
+    void this.loadModel(url)
+      .then((meshId) => {
+        if (this.store.alive[entityId] === 1) {
+          this.store.meshIds[entityId] = meshId;
+        }
+      })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        warnings?.push(`Failed to load model "${url}": ${msg}`);
+        console.warn(`therse3d: Failed to load model "${url}": ${msg}`);
+      });
   }
 
   sync(state: SceneSyncState): SceneSyncResult {
@@ -359,6 +435,7 @@ export class Engine {
         this.camera.position[2] = tz + dist * 0.9;
         break;
     }
+    this.camera.notifyChanged();
   }
 
   describe(): SceneDescription {
@@ -369,6 +446,23 @@ export class Engine {
       viewProjMatrix: vp,
       resolveName: (id) => this.entitiesById.get(id)?.name,
     });
+  }
+
+  raycast(
+    origin: readonly [number, number, number],
+    direction: readonly [number, number, number],
+  ): RaycastHit | null {
+    return raycastStore(this.store, origin, direction, (id) => this.entitiesById.get(id)?.name);
+  }
+
+  pick(x: number, y: number, options?: { normalized?: boolean }): RaycastHit | null {
+    const canvas = this.gpu.canvas;
+    const w = Math.max(1, canvas.clientWidth || canvas.width);
+    const h = Math.max(1, canvas.clientHeight || canvas.height);
+    const nx = options?.normalized ? x : x / w;
+    const ny = options?.normalized ? y : y / h;
+    const vp = this.camera.updateMatrices(Math.max(1, canvas.width) / Math.max(1, canvas.height));
+    return pickFromScreen(this.store, vp, nx, ny, (id) => this.entitiesById.get(id)?.name);
   }
 
   async snapshot(options?: SnapshotOptions): Promise<SnapshotResult> {

@@ -1,4 +1,4 @@
-﻿export interface GPUDeviceInitOptions {
+export interface GPUDeviceInitOptions {
   autoResize?: boolean;
   onDeviceLost?: (info: GPUDeviceLostInfo) => void;
 }
@@ -64,6 +64,10 @@ export class GPUDeviceContext {
     }
 
     const device = await adapter.requestDevice();
+    device.addEventListener('uncapturederror', (event) => {
+      console.error('therse3d WebGPU uncaptured error:', event.error);
+    });
+
     const context = canvas.getContext('webgpu');
     if (!context) {
       throw new Error('Failed to acquire WebGPU canvas context.');
@@ -91,10 +95,11 @@ export class GPUDeviceContext {
   }
 
   private setupResize(): void {
+    const maxDim = this.device.limits.maxTextureDimension2D || 8192;
     const updateSize = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const width = Math.max(1, Math.floor(this.canvas.clientWidth * dpr));
-      const height = Math.max(1, Math.floor(this.canvas.clientHeight * dpr));
+      const width = Math.min(maxDim, Math.max(1, Math.floor(this.canvas.clientWidth * dpr)));
+      const height = Math.min(maxDim, Math.max(1, Math.floor(this.canvas.clientHeight * dpr)));
       if (this.canvas.width !== width || this.canvas.height !== height) {
         this.canvas.width = width;
         this.canvas.height = height;

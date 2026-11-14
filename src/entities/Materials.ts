@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Semantische Material-Presets & fehlertoleranter Farbparser für Menschen und LLMs.
  */
 export interface MaterialDefinition {
@@ -16,7 +16,9 @@ export type MaterialPresetName =
   | 'frosted-glass'
   | 'emissive-neon'
   | 'matte-ceramic'
-  | 'polished-gold';
+  | 'polished-gold'
+  | 'studio-grid'
+  | 'carbon-fiber';
 
 export const MATERIAL_PRESETS: Record<MaterialPresetName, MaterialDefinition> = {
   'oak-wood': { color: [0.55, 0.37, 0.22, 1.0], metalness: 0.0, roughness: 0.72, emissive: 0.0, materialId: 1 },
@@ -26,6 +28,8 @@ export const MATERIAL_PRESETS: Record<MaterialPresetName, MaterialDefinition> = 
   'emissive-neon': { color: [0.10, 0.85, 1.00, 1.0], metalness: 0.0, roughness: 0.20, emissive: 2.0, materialId: 5 },
   'matte-ceramic': { color: [0.92, 0.91, 0.88, 1.0], metalness: 0.0, roughness: 0.85, emissive: 0.0, materialId: 6 },
   'polished-gold': { color: [0.96, 0.78, 0.34, 1.0], metalness: 1.0, roughness: 0.14, emissive: 0.0, materialId: 7 },
+  'studio-grid': { color: [0.16, 0.19, 0.24, 1.0], metalness: 0.0, roughness: 0.88, emissive: 0.0, materialId: 8 },
+  'carbon-fiber': { color: [0.10, 0.11, 0.13, 1.0], metalness: 0.25, roughness: 0.38, emissive: 0.0, materialId: 9 },
 };
 
 const CSS_COLORS: Record<string, [number, number, number]> = {

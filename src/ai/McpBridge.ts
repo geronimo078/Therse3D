@@ -13,7 +13,8 @@ export type McpToolName =
   | 'therse_undo'
   | 'therse_inspect'
   | 'therse_snapshot'
-  | 'therse_camera_focus';
+  | 'therse_camera_focus'
+  | 'therse_pick';
 
 export interface CameraFocusArgs {
   target?: string;
@@ -134,6 +135,13 @@ export class McpBridge {
           ...(focusArgs.distance !== undefined ? { distance: focusArgs.distance } : {}),
         });
         return { ok: true, scene: this.engine.describe() };
+      }
+
+      case 'therse_pick': {
+        const pickArgs = (args && typeof args === 'object' ? args : {}) as { x?: number; y?: number };
+        const x = typeof pickArgs.x === 'number' && Number.isFinite(pickArgs.x) ? pickArgs.x : 0.5;
+        const y = typeof pickArgs.y === 'number' && Number.isFinite(pickArgs.y) ? pickArgs.y : 0.5;
+        return { hit: this.engine.pick(x, y, { normalized: true }) };
       }
 
       default:

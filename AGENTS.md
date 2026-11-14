@@ -1,4 +1,4 @@
-﻿# AGENTS.md — Project Instructions for AI Coding Agents
+# AGENTS.md — Project Instructions for AI Coding Agents
 
 This repository implements **therse3d**, an AI-native WebGPU 3D engine in TypeScript.
 

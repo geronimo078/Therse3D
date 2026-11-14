@@ -1,4 +1,4 @@
-﻿# AI-Assisted Development Guide (`therse3d`)
+# AI-Assisted Development Guide (`therse3d`)
 
 This document defines the mandatory workflow for **AI coding agents** (e.g., Antigravity, Cursor, Claude Code, Codex) and **local LLMs/VLMs** when developing and using `therse3d`.
 

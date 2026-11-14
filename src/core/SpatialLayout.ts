@@ -15,12 +15,29 @@ export type SpatialAlign =
   | 'back-left'
   | 'back-right';
 
+export type SpatialSide = 'left' | 'right' | 'front' | 'back';
+export type SpatialGroupLayoutKind = 'grid' | 'ring' | 'row';
+
+export interface SceneLayoutGroup {
+  kind: SpatialGroupLayoutKind;
+  entities: string[];
+  center?: [number, number, number];
+  radius?: number;
+  spacing?: number;
+  columns?: number;
+  lookAtCenter?: boolean;
+}
+
 export interface SpatialPlacement {
   on?: string;
+  beside?: string;
+  side?: SpatialSide;
+  inside?: string;
   align?: SpatialAlign;
   margin?: number;
   offset?: [number, number, number];
   lookAt?: string | [number, number, number];
+  avoidOverlap?: boolean;
 }
 
 export interface AABB {
@@ -43,7 +60,7 @@ export class SpatialLayout {
    * Topologische Sortierung von Layout-Nodes nach `on`- und `parent`-Abhängigkeiten.
    * Erkennt Zyklen fehlertolerant und meldet Warnungen statt zu crashen.
    */
-  topologicalSort<T extends { id: string; on?: string; parent?: string }>(
+  topologicalSort<T extends { id: string; on?: string; beside?: string; inside?: string; parent?: string }>(
     nodes: readonly T[],
     warnings?: string[],
   ): T[] {
@@ -61,20 +78,17 @@ export class SpatialLayout {
     const visit = (node: T) => {
       if (visited.has(node.id)) return;
       if (visiting.has(node.id)) {
-        warnings?.push(`Circular "on"/"parent" dependency detected involving "${node.id}".`);
+        warnings?.push(`Circular "on"/"beside"/"inside"/"parent" dependency detected involving "${node.id}".`);
         return;
       }
       visiting.add(node.id);
-      if (node.parent && node.parent !== node.id) {
-        const parentNode = byId.get(node.parent);
-        if (parentNode) {
-          visit(parentNode);
-        }
-      }
-      if (node.on && node.on !== node.id) {
-        const onNode = byId.get(node.on);
-        if (onNode) {
-          visit(onNode);
+      const deps = [node.parent, node.on, node.beside, node.inside];
+      for (const depId of deps) {
+        if (depId && depId !== node.id) {
+          const depNode = byId.get(depId);
+          if (depNode) {
+            visit(depNode);
+          }
         }
       }
       visiting.delete(node.id);
@@ -151,6 +165,125 @@ export class SpatialLayout {
     return [x + ox, y + oy, z + oz];
   }
 
+  computeBesidePosition(
+    target: AABB,
+    subjectSize: [number, number, number],
+    placement: SpatialPlacement,
+  ): [number, number, number] {
+    const halfX = subjectSize[0] * 0.5;
+    const halfY = subjectSize[1] * 0.5;
+    const halfZ = subjectSize[2] * 0.5;
+    const margin = Number.isFinite(placement.margin) ? placement.margin! : 0.1;
+
+    const targetCenterX = (target.min[0] + target.max[0]) * 0.5;
+    const targetCenterZ = (target.min[2] + target.max[2]) * 0.5;
+    const side: SpatialSide =
+      placement.side ??
+      (placement.align?.includes('left')
+        ? 'left'
+        : placement.align?.includes('front')
+          ? 'front'
+          : placement.align?.includes('back')
+            ? 'back'
+            : 'right');
+
+    let x = targetCenterX;
+    let z = targetCenterZ;
+    if (side === 'left') {
+      x = target.min[0] - halfX - margin;
+    } else if (side === 'right') {
+      x = target.max[0] + halfX + margin;
+    } else if (side === 'front') {
+      z = target.max[2] + halfZ + margin;
+    } else {
+      z = target.min[2] - halfZ - margin;
+    }
+
+    const y = target.min[1] + halfY;
+    const ox = placement.offset && Number.isFinite(placement.offset[0]) ? placement.offset[0] : 0;
+    const oy = placement.offset && Number.isFinite(placement.offset[1]) ? placement.offset[1] : 0;
+    const oz = placement.offset && Number.isFinite(placement.offset[2]) ? placement.offset[2] : 0;
+    return [x + ox, y + oy, z + oz];
+  }
+
+  computeInsidePosition(
+    target: AABB,
+    subjectSize: [number, number, number],
+    placement: SpatialPlacement,
+  ): [number, number, number] {
+    const [x, , z] = this.computeRelativePosition(target, subjectSize, placement);
+    const halfY = subjectSize[1] * 0.5;
+    const margin = Number.isFinite(placement.margin) ? placement.margin! : 0;
+    const oy = placement.offset && Number.isFinite(placement.offset[1]) ? placement.offset[1] : 0;
+    const y = target.min[1] + halfY + margin + oy;
+    return [x, y, z];
+  }
+
+  resolveOverlapXZ(
+    store: WorldStore,
+    entityId: number,
+    ignoreId?: number,
+    warnings?: string[],
+  ): boolean {
+    let moved = false;
+    const pIdx = entityId * 3;
+    const bMin = store.boundsMin;
+    const bMax = store.boundsMax;
+
+    for (let other = 0; other < store.highWaterMark; other++) {
+      if (other === entityId || other === ignoreId) continue;
+      if (store.alive[other] === 0 || store.visible[other] === 0) continue;
+      if ((store.geometryTypes[other] ?? 0) === GeometryTypeId.Plane) continue;
+      if ((store.geometryTypes[other] ?? 0) === GeometryTypeId.Light) continue;
+
+      const oIdx = other * 3;
+      const overlapX = Math.min(bMax[pIdx] ?? 0, bMax[oIdx] ?? 0) - Math.max(bMin[pIdx] ?? 0, bMin[oIdx] ?? 0);
+      const overlapY = Math.min(bMax[pIdx + 1] ?? 0, bMax[oIdx + 1] ?? 0) - Math.max(bMin[pIdx + 1] ?? 0, bMin[oIdx + 1] ?? 0);
+      const overlapZ = Math.min(bMax[pIdx + 2] ?? 0, bMax[oIdx + 2] ?? 0) - Math.max(bMin[pIdx + 2] ?? 0, bMin[oIdx + 2] ?? 0);
+
+      if (overlapX > 0.001 && overlapY > 0.001 && overlapZ > 0.001) {
+        const cx = ((bMin[pIdx] ?? 0) + (bMax[pIdx] ?? 0)) * 0.5;
+        const cz = ((bMin[pIdx + 2] ?? 0) + (bMax[pIdx + 2] ?? 0)) * 0.5;
+        const ocx = ((bMin[oIdx] ?? 0) + (bMax[oIdx] ?? 0)) * 0.5;
+        const ocz = ((bMin[oIdx + 2] ?? 0) + (bMax[oIdx + 2] ?? 0)) * 0.5;
+
+        if (overlapX <= overlapZ) {
+          const dir = cx >= ocx ? 1 : -1;
+          store.positions[pIdx] = (store.positions[pIdx] ?? 0) + dir * (overlapX + 0.02);
+        } else {
+          const dir = cz >= ocz ? 1 : -1;
+          store.positions[pIdx + 2] = (store.positions[pIdx + 2] ?? 0) + dir * (overlapZ + 0.02);
+        }
+        store.markDirty(entityId, DirtyFlag.Transform | DirtyFlag.Bounds);
+        store.updateMatrices();
+        moved = true;
+      }
+    }
+
+    if (moved) {
+      warnings?.push(`Adjusted position of entity #${entityId} to avoid overlap.`);
+    }
+    return moved;
+  }
+
+  private resolveTargetAABB(
+    store: WorldStore,
+    targetName: string,
+    kind: string,
+    resolveEntityId: (name: string) => number | undefined,
+    warnings?: string[],
+  ): { aabb: AABB; targetId: number | undefined } {
+    const targetId = resolveEntityId(targetName);
+    if (targetId !== undefined) {
+      return { aabb: this.getEntityAABB(store, targetId), targetId };
+    }
+    if (targetName === 'floor') {
+      return { aabb: FLOOR_AABB, targetId: undefined };
+    }
+    warnings?.push(`Unknown "${kind}" target "${targetName}"; placing relative to floor instead.`);
+    return { aabb: FLOOR_AABB, targetId: undefined };
+  }
+
   applyPlacement(
     store: WorldStore,
     entityId: number,
@@ -158,24 +291,35 @@ export class SpatialLayout {
     resolveEntityId: (name: string) => number | undefined,
     warnings?: string[],
   ): void {
-    if (placement.on !== undefined) {
-      let targetAABB: AABB | undefined;
-      const targetId = resolveEntityId(placement.on);
-      if (targetId !== undefined) {
-        targetAABB = this.getEntityAABB(store, targetId);
-      } else if (placement.on === 'floor') {
-        targetAABB = FLOOR_AABB;
-      } else {
-        warnings?.push(`Unknown "on" target "${placement.on}"; placing on floor instead.`);
-        targetAABB = FLOOR_AABB;
-      }
+    let ignoreOverlapId: number | undefined;
 
+    if (placement.on !== undefined) {
+      const resolved = this.resolveTargetAABB(store, placement.on, 'on', resolveEntityId, warnings);
+      ignoreOverlapId = resolved.targetId;
       const [hx, hy, hz] = this.getHalfExtents(store, entityId);
-      const [px, py, pz] = this.computeRelativePosition(
-        targetAABB,
-        [hx * 2, hy * 2, hz * 2],
-        placement,
-      );
+      const [px, py, pz] = this.computeRelativePosition(resolved.aabb, [hx * 2, hy * 2, hz * 2], placement);
+      const pIdx = entityId * 3;
+      store.positions[pIdx] = px;
+      store.positions[pIdx + 1] = py;
+      store.positions[pIdx + 2] = pz;
+      store.markDirty(entityId, DirtyFlag.Transform | DirtyFlag.Bounds);
+      store.updateMatrices();
+    } else if (placement.beside !== undefined) {
+      const resolved = this.resolveTargetAABB(store, placement.beside, 'beside', resolveEntityId, warnings);
+      ignoreOverlapId = resolved.targetId;
+      const [hx, hy, hz] = this.getHalfExtents(store, entityId);
+      const [px, py, pz] = this.computeBesidePosition(resolved.aabb, [hx * 2, hy * 2, hz * 2], placement);
+      const pIdx = entityId * 3;
+      store.positions[pIdx] = px;
+      store.positions[pIdx + 1] = py;
+      store.positions[pIdx + 2] = pz;
+      store.markDirty(entityId, DirtyFlag.Transform | DirtyFlag.Bounds);
+      store.updateMatrices();
+    } else if (placement.inside !== undefined) {
+      const resolved = this.resolveTargetAABB(store, placement.inside, 'inside', resolveEntityId, warnings);
+      ignoreOverlapId = resolved.targetId;
+      const [hx, hy, hz] = this.getHalfExtents(store, entityId);
+      const [px, py, pz] = this.computeInsidePosition(resolved.aabb, [hx * 2, hy * 2, hz * 2], placement);
       const pIdx = entityId * 3;
       store.positions[pIdx] = px;
       store.positions[pIdx + 1] = py;
@@ -230,5 +374,77 @@ export class SpatialLayout {
         store.updateMatrices();
       }
     }
+
+    if (placement.avoidOverlap) {
+      this.resolveOverlapXZ(store, entityId, ignoreOverlapId, warnings);
+    }
+  }
+
+  arrangeGroup(
+    store: WorldStore,
+    group: SceneLayoutGroup,
+    resolveEntityId: (name: string) => number | undefined,
+    warnings?: string[],
+  ): void {
+    const ids: number[] = [];
+    for (const name of group.entities) {
+      const id = resolveEntityId(name);
+      if (id !== undefined) {
+        ids.push(id);
+      } else {
+        warnings?.push(`Layout group references unknown entity "${name}".`);
+      }
+    }
+    if (ids.length === 0) return;
+
+    const cx = group.center && Number.isFinite(group.center[0]) ? group.center[0] : 0;
+    const cy = group.center && Number.isFinite(group.center[1]) ? group.center[1] : 0;
+    const cz = group.center && Number.isFinite(group.center[2]) ? group.center[2] : 0;
+    const spacing = Number.isFinite(group.spacing) ? Math.max(0.1, group.spacing!) : 1.2;
+    const radius = Number.isFinite(group.radius) ? Math.max(0.2, group.radius!) : 2.0;
+
+    if (group.kind === 'ring') {
+      const step = (Math.PI * 2) / ids.length;
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i]!;
+        const angle = i * step;
+        const pIdx = id * 3;
+        const px = cx + Math.sin(angle) * radius;
+        const pz = cz + Math.cos(angle) * radius;
+        store.positions[pIdx] = px;
+        store.positions[pIdx + 1] = cy + (store.positions[pIdx + 1] ?? 0);
+        store.positions[pIdx + 2] = pz;
+        if (group.lookAtCenter) {
+          quat.fromLookAt(store.rotations, id * 4, px, store.positions[pIdx + 1] ?? 0, pz, cx, store.positions[pIdx + 1] ?? 0, cz);
+        }
+        store.markDirty(id, DirtyFlag.Transform | DirtyFlag.Bounds);
+      }
+    } else if (group.kind === 'grid') {
+      const cols = Math.max(1, Math.floor(group.columns ?? Math.ceil(Math.sqrt(ids.length))));
+      const rows = Math.ceil(ids.length / cols);
+      const startX = cx - ((cols - 1) * spacing) * 0.5;
+      const startZ = cz - ((rows - 1) * spacing) * 0.5;
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i]!;
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const pIdx = id * 3;
+        store.positions[pIdx] = startX + col * spacing;
+        store.positions[pIdx + 1] = cy + (store.positions[pIdx + 1] ?? 0);
+        store.positions[pIdx + 2] = startZ + row * spacing;
+        store.markDirty(id, DirtyFlag.Transform | DirtyFlag.Bounds);
+      }
+    } else {
+      const startX = cx - ((ids.length - 1) * spacing) * 0.5;
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i]!;
+        const pIdx = id * 3;
+        store.positions[pIdx] = startX + i * spacing;
+        store.positions[pIdx + 1] = cy + (store.positions[pIdx + 1] ?? 0);
+        store.positions[pIdx + 2] = cz;
+        store.markDirty(id, DirtyFlag.Transform | DirtyFlag.Bounds);
+      }
+    }
+    store.updateMatrices();
   }
 }

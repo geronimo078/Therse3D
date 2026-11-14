@@ -78,6 +78,7 @@ describe('Schema & PromptContext (Step 6)', () => {
       'therse_inspect',
       'therse_snapshot',
       'therse_camera_focus',
+      'therse_pick',
     ]);
 
     const prompt = Schema.getPromptContext();

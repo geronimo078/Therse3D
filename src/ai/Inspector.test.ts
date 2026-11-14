@@ -1,5 +1,5 @@
-﻿import { describe, expect, it } from 'vitest';
-import { Inspector } from './Inspector';
+import { describe, expect, it } from 'vitest';
+import { Inspector, pickFromScreen, raycastStore } from './Inspector';
 import { WorldStore } from '../core/WorldStore';
 import { mat4 } from '../core/Math';
 
@@ -91,6 +91,28 @@ describe('Inspector (Step 5)', () => {
     const chair = desc.entities.find((e) => e.id === 'chair')!;
     expect(chair.relations.collidingWith).toContain('table');
     expect(desc.warnings.some((w) => w.includes("'table'") && w.includes("intersects with 'chair'"))).toBe(true);
+  });
+
+  it('supports raycastStore and pickFromScreen for 3D selection', () => {
+    const store = new WorldStore(8);
+    const vp = makeTestViewProj();
+
+    const boxId = store.allocate();
+    store.positions.set([0, 0, 0], boxId * 3);
+    store.updateMatrices();
+
+    const names: Record<number, string> = { [boxId]: 'target-box' };
+    const hit = raycastStore(store, [0, 0, 5], [0, 0, -1], (id) => names[id]);
+    expect(hit).not.toBeNull();
+    expect(hit!.id).toBe('target-box');
+    expect(hit!.distance).toBeCloseTo(4.5);
+
+    const miss = raycastStore(store, [10, 10, 5], [0, 0, -1]);
+    expect(miss).toBeNull();
+
+    const screenHit = pickFromScreen(store, vp, 0.5, 0.5, (id) => names[id]);
+    expect(screenHit).not.toBeNull();
+    expect(screenHit!.id).toBe('target-box');
   });
 });
 

@@ -62,6 +62,9 @@ export {
 
 export {
   Inspector,
+  raycastStore,
+  pickFromScreen,
+  type RaycastHit,
   type EntityDescription,
   type SceneDescription,
   type ScreenRegion,

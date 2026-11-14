@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "therse3d",
   "version": "0.1.0",
   "description": "AI-Native WebGPU 3D Engine in TypeScript",
@@ -21,7 +21,8 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "mcp": "node scripts/mcp-server.mjs"
   },
   "keywords": [
     "webgpu",

@@ -1,4 +1,5 @@
-﻿import type { WorldStore } from '../core/WorldStore';
+import { mat4, type Mat4 } from '../core/Math';
+import { GeometryTypeId, type WorldStore } from '../core/WorldStore';
 
 export type ScreenRegion =
   | 'center'
@@ -238,4 +239,105 @@ function projectAABB(
     screenCoverage: coverage,
     screenBox: [sxMin, syMin, sxMax, syMax],
   };
+}
+
+export interface RaycastHit {
+  entityId: number;
+  id: string;
+  distance: number;
+  point: [number, number, number];
+}
+
+const INV_VP_SCRATCH = new Float32Array(16);
+
+export function raycastStore(
+  store: WorldStore,
+  origin: readonly [number, number, number],
+  direction: readonly [number, number, number],
+  resolveName?: (entityId: number) => string | undefined,
+): RaycastHit | null {
+  const ox = origin[0], oy = origin[1], oz = origin[2];
+  const dLen = Math.hypot(direction[0], direction[1], direction[2]);
+  if (dLen < 1e-8) return null;
+  const dx = direction[0] / dLen;
+  const dy = direction[1] / dLen;
+  const dz = direction[2] / dLen;
+
+  const invDx = Math.abs(dx) > 1e-8 ? 1 / dx : 1e8;
+  const invDy = Math.abs(dy) > 1e-8 ? 1 / dy : 1e8;
+  const invDz = Math.abs(dz) > 1e-8 ? 1 / dz : 1e8;
+
+  let bestT = Infinity;
+  let bestId = -1;
+
+  for (let id = 0; id < store.highWaterMark; id++) {
+    if (store.alive[id] === 0 || store.visible[id] === 0) continue;
+    const gType = store.geometryTypes[id] ?? 0;
+    if (gType === GeometryTypeId.Light || gType === GeometryTypeId.Group) continue;
+
+    const pIdx = id * 3;
+    const minX = store.boundsMin[pIdx] ?? 0;
+    const minY = store.boundsMin[pIdx + 1] ?? 0;
+    const minZ = store.boundsMin[pIdx + 2] ?? 0;
+    const maxX = store.boundsMax[pIdx] ?? 0;
+    const maxY = store.boundsMax[pIdx + 1] ?? 0;
+    const maxZ = store.boundsMax[pIdx + 2] ?? 0;
+
+    const t1 = (minX - ox) * invDx;
+    const t2 = (maxX - ox) * invDx;
+    const t3 = (minY - oy) * invDy;
+    const t4 = (maxY - oy) * invDy;
+    const t5 = (minZ - oz) * invDz;
+    const t6 = (maxZ - oz) * invDz;
+
+    const tMin = Math.max(Math.min(t1, t2), Math.min(t3, t4), Math.min(t5, t6));
+    const tMax = Math.min(Math.max(t1, t2), Math.max(t3, t4), Math.max(t5, t6));
+
+    if (tMax < 0 || tMin > tMax) continue;
+    const hitT = tMin >= 0 ? tMin : tMax;
+    if (hitT < bestT) {
+      bestT = hitT;
+      bestId = id;
+    }
+  }
+
+  if (bestId < 0) return null;
+  return {
+    entityId: bestId,
+    id: resolveName?.(bestId) ?? `entity_${bestId}`,
+    distance: bestT,
+    point: [ox + dx * bestT, oy + dy * bestT, oz + dz * bestT],
+  };
+}
+
+export function pickFromScreen(
+  store: WorldStore,
+  viewProjMatrix: Mat4,
+  nx: number,
+  ny: number,
+  resolveName?: (entityId: number) => string | undefined,
+): RaycastHit | null {
+  if (!mat4.invert(INV_VP_SCRATCH, viewProjMatrix)) return null;
+  const ndcX = nx * 2 - 1;
+  const ndcY = 1 - ny * 2;
+
+  const m = INV_VP_SCRATCH;
+  const unproject = (z: number): [number, number, number] => {
+    const w = (m[3] ?? 0) * ndcX + (m[7] ?? 0) * ndcY + (m[11] ?? 0) * z + (m[15] ?? 1);
+    const invW = Math.abs(w) > 1e-8 ? 1 / w : 1;
+    return [
+      ((m[0] ?? 0) * ndcX + (m[4] ?? 0) * ndcY + (m[8] ?? 0) * z + (m[12] ?? 0)) * invW,
+      ((m[1] ?? 0) * ndcX + (m[5] ?? 0) * ndcY + (m[9] ?? 0) * z + (m[13] ?? 0)) * invW,
+      ((m[2] ?? 0) * ndcX + (m[6] ?? 0) * ndcY + (m[10] ?? 0) * z + (m[14] ?? 0)) * invW,
+    ];
+  };
+
+  const nearPt = unproject(0);
+  const farPt = unproject(1);
+  return raycastStore(
+    store,
+    nearPt,
+    [farPt[0] - nearPt[0], farPt[1] - nearPt[1], farPt[2] - nearPt[2]],
+    resolveName,
+  );
 }

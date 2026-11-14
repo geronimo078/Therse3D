@@ -1,4 +1,4 @@
-﻿import { DirtyFlag, type WorldStore } from '../core/WorldStore';
+import { DirtyFlag, type WorldStore } from '../core/WorldStore';
 
 export type Vec3Like = readonly [number, number, number] | Float32Array;
 export type Vec4Like = readonly [number, number, number, number] | Float32Array;

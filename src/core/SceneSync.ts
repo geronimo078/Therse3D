@@ -1,8 +1,8 @@
 import { quat } from './Math';
-import { SpatialLayout, type SpatialPlacement } from './SpatialLayout';
+import { SpatialLayout, type SceneLayoutGroup, type SpatialPlacement } from './SpatialLayout';
 import { DirtyFlag, GeometryTypeId, LightKindId, type WorldStore } from './WorldStore';
 import { parseColor, resolveMaterial } from '../entities/Materials';
-import type { LightKind, PrimitiveType } from '../entities/Primitives';
+import { applyLineEndpoints, type GeometryMeshData, type LightKind, type PrimitiveType } from '../entities/Primitives';
 
 export type CameraAnglePreset = 'front' | 'front-elevated' | 'top' | 'isometric';
 
@@ -31,6 +31,10 @@ export interface SceneSyncNode extends SpatialPlacement {
   intensity?: number;
   range?: number;
   castShadow?: boolean;
+  from?: [number, number, number];
+  to?: [number, number, number];
+  url?: string;
+  mesh?: GeometryMeshData;
 }
 
 export interface SceneSyncState {
@@ -38,6 +42,7 @@ export interface SceneSyncState {
   transition?: number;
   camera?: SceneSyncCamera;
   entities: SceneSyncNode[];
+  layouts?: SceneLayoutGroup[];
 }
 
 export interface ScenePatchState {
@@ -61,6 +66,7 @@ export interface SceneSyncHooks {
   onCamera?: (camera: SceneSyncCamera, resolveEntityId: (name: string) => number | undefined, warnings: string[]) => void;
   onEntityCreated?: (name: string, entityId: number) => void;
   onEntityRemoved?: (name: string, entityId: number) => void;
+  onModelRef?: (entityId: number, url: string | undefined, mesh: GeometryMeshData | undefined, warnings: string[]) => void;
 }
 
 const VALID_TYPE_MAP: Record<string, GeometryTypeId> = {
@@ -344,6 +350,10 @@ export class SceneSync {
         store.setParent(entityId, -1);
       }
 
+      if (mappedType === GeometryTypeId.Model) {
+        hooks?.onModelRef?.(entityId, node.url, node.mesh, warnings);
+      }
+
       // Light parameters
       if (mappedType === GeometryTypeId.Light) {
         const lIdx = entityId * 4;
@@ -443,8 +453,22 @@ export class SceneSync {
       store.markDirty(entityId, DirtyFlag.Transform | DirtyFlag.Bounds);
       store.updateMatrices();
 
+      if (mappedType === GeometryTypeId.Line && node.from !== undefined && node.to !== undefined) {
+        const from = sanitizeVec3(node.from, [0, 0, 0], `${node.id}.from`, warnings);
+        const to = sanitizeVec3(node.to, [0, 1, 0], `${node.id}.to`, warnings);
+        applyLineEndpoints(store, entityId, from, to);
+        store.updateMatrices();
+      }
+
       // Relative SpatialLayout placement (resolves against target AABBs)
-      if (node.on !== undefined || node.offset !== undefined || node.lookAt !== undefined) {
+      if (
+        node.on !== undefined ||
+        node.beside !== undefined ||
+        node.inside !== undefined ||
+        node.offset !== undefined ||
+        node.lookAt !== undefined ||
+        node.avoidOverlap === true
+      ) {
         this.layout.applyPlacement(
           store,
           entityId,
@@ -493,6 +517,14 @@ export class SceneSync {
         store.colors[qIdx + 1] = targetColor[1];
         store.colors[qIdx + 2] = targetColor[2];
         store.colors[qIdx + 3] = targetColor[3];
+      }
+    }
+
+    if (state.layouts && Array.isArray(state.layouts)) {
+      for (const group of state.layouts) {
+        if (group && Array.isArray(group.entities)) {
+          this.layout.arrangeGroup(store, group, (name) => this.nameToEntityId.get(name), warnings);
+        }
       }
     }
 

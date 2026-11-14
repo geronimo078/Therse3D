@@ -15,6 +15,7 @@ struct SceneUniforms {
   counts: vec4<f32>, // x = dynamicLightCount (0..8), y = shadowCasterCount (0..16)
   lights: array<DynamicLight, 8>,
   shadowCasters: array<vec4<f32>, 16>, // x = cx, y = minY, z = cz, w = radiusXZ
+  lightViewProj: mat4x4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> scene: SceneUniforms;
@@ -22,6 +23,8 @@ struct SceneUniforms {
 @group(0) @binding(2) var<storage, read> colors: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> pbrParams: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> instanceIds: array<u32>;
+@group(0) @binding(5) var shadowMap: texture_depth_2d;
+@group(0) @binding(6) var shadowSampler: sampler_comparison;
 
 struct VertexInput {
   @location(0) position: vec3<f32>,
@@ -56,6 +59,14 @@ fn vs_main(in: VertexInput) -> VertexOutput {
   out.uv = in.uv;
   out.entityId = entityId;
   return out;
+}
+
+@vertex
+fn vs_shadow(in: VertexInput) -> @builtin(position) vec4<f32> {
+  let entityId = instanceIds[in.instanceIdx];
+  let model = modelMatrices[entityId];
+  let worldPos = model * vec4<f32>(in.position, 1.0);
+  return scene.lightViewProj * worldPos;
 }
 
 fn distributionGGX(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
@@ -132,6 +143,25 @@ fn computeContactShadow(worldPos: vec3<f32>, N: vec3<f32>) -> f32 {
   return shadow;
 }
 
+fn computeDirectionalShadow(worldPos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
+  let lightClip = scene.lightViewProj * vec4<f32>(worldPos, 1.0);
+  let ndc = lightClip.xyz / max(lightClip.w, 1e-5);
+  let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+  let inBounds = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0 && ndc.z >= 0.0 && ndc.z <= 1.0;
+
+  let bias = max(0.002 * (1.0 - max(dot(N, L), 0.0)), 0.0005);
+  let texelSize = 1.0 / 1024.0;
+  var sum = 0.0;
+  for (var y = -1; y <= 1; y++) {
+    for (var x = -1; x <= 1; x++) {
+      let offset = vec2<f32>(f32(x), f32(y)) * texelSize;
+      sum += textureSampleCompareLevel(shadowMap, shadowSampler, uv + offset, ndc.z - bias);
+    }
+  }
+  let pcf = sum / 9.0;
+  return select(1.0, pcf, inBounds);
+}
+
 fn acesToneMap(x: vec3<f32>) -> vec3<f32> {
   let a = 2.51;
   let b = 0.03;
@@ -141,13 +171,78 @@ fn acesToneMap(x: vec3<f32>) -> vec3<f32> {
   return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+fn hash21(p: vec2<f32>) -> f32 {
+  let q = fract(p * vec2<f32>(123.34, 456.21));
+  let d = dot(q, q + 45.32);
+  return fract((q.x + q.y) * d);
+}
+
+fn applyProceduralMaterial(
+  materialId: i32,
+  worldPos: vec3<f32>,
+  uv: vec2<f32>,
+  baseAlbedo: vec3<f32>,
+  baseRoughness: f32,
+) -> vec4<f32> {
+  // Compute derivatives in uniform control flow before branching on materialId
+  let worldXZDeriv = max(fwidth(worldPos.xz), vec2<f32>(0.001));
+  var albedo = baseAlbedo;
+  var rough = baseRoughness;
+
+  if (materialId == 1) {
+    // oak-wood: procedural grain rings along world X/Z
+    let p = worldPos.xz * 4.5 + vec2<f32>(worldPos.y * 1.5, 0.0);
+    let warp = sin(p.x * 2.0 + sin(p.y * 3.0) * 0.6) * 0.5;
+    let ring = 0.5 + 0.5 * sin((p.x * 8.0 + warp * 4.0) + p.y * 1.5);
+    albedo = mix(baseAlbedo * 0.76, baseAlbedo * 1.12, ring);
+    rough = clamp(baseRoughness + (ring - 0.5) * 0.12, 0.08, 1.0);
+  } else if (materialId == 2) {
+    // brushed-aluminum: fine directional streaks
+    let streak = sin(uv.y * 260.0 + sin(uv.x * 25.0) * 1.5) * 0.5 + 0.5;
+    albedo = baseAlbedo * mix(0.93, 1.05, streak);
+    rough = clamp(baseRoughness + (streak - 0.5) * 0.08, 0.08, 1.0);
+  } else if (materialId == 8) {
+    // studio-grid: world-space 1.0m major + 0.25m minor anti-aliased grid
+    let majorCoord = abs(fract(worldPos.xz - 0.5) - 0.5) / worldXZDeriv;
+    let majorLine = 1.0 - min(min(majorCoord.x, majorCoord.y), 1.0);
+    let minorCoord = abs(fract(worldPos.xz * 4.0 - 0.5) - 0.5) / (worldXZDeriv * 4.0);
+    let minorLine = 1.0 - min(min(minorCoord.x, minorCoord.y), 1.0);
+    let axisX = 1.0 - smoothstep(0.0, 0.03, abs(worldPos.z));
+    let axisZ = 1.0 - smoothstep(0.0, 0.03, abs(worldPos.x));
+    albedo = mix(baseAlbedo, baseAlbedo * 1.45, minorLine * 0.35);
+    albedo = mix(albedo, vec3<f32>(0.36, 0.45, 0.58), majorLine * 0.75);
+    albedo = mix(albedo, vec3<f32>(0.85, 0.25, 0.25), axisX * 0.65);
+    albedo = mix(albedo, vec3<f32>(0.25, 0.55, 0.90), axisZ * 0.65);
+  } else if (materialId == 9) {
+    // carbon-fiber: diagonal twill weave
+    let cell = floor(uv * 64.0);
+    let diag = i32(cell.x + cell.y) % 4;
+    let weave = select(0.75, 1.25, diag < 2);
+    albedo = baseAlbedo * weave;
+    rough = clamp(baseRoughness + select(0.08, -0.08, diag < 2), 0.12, 1.0);
+  } else if (materialId == 6) {
+    // matte-ceramic: subtle micro-speckle
+    let n = hash21(floor(worldPos.xz * 120.0));
+    albedo = baseAlbedo * mix(0.96, 1.02, n);
+  }
+
+  return vec4<f32>(albedo, rough);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let baseColor = colors[in.entityId];
   let params = pbrParams[in.entityId]; // [metalness, roughness, emissive, materialId]
-  let albedo = baseColor.rgb;
+  let procMat = applyProceduralMaterial(
+    i32(params.w + 0.5),
+    in.worldPos,
+    in.uv,
+    baseColor.rgb,
+    clamp(params.y, 0.04, 1.0),
+  );
+  let albedo = procMat.rgb;
   let metalness = clamp(params.x, 0.0, 1.0);
-  let roughness = clamp(params.y, 0.04, 1.0);
+  let roughness = procMat.a;
   let emissive = max(params.z, 0.0);
 
   let N = normalize(in.worldNormal);
@@ -160,7 +255,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let rimDir = normalize(vec3<f32>(0.2, 0.6, -0.8));
 
   var Lo = vec3<f32>(0.0);
-  Lo += evalLight(N, V, keyDir, scene.keyLightColor.rgb * 2.4, albedo, metalness, roughness, F0);
+  let dirShadow = computeDirectionalShadow(in.worldPos, N, keyDir);
+  Lo += evalLight(N, V, keyDir, scene.keyLightColor.rgb * 2.4, albedo, metalness, roughness, F0) * mix(0.25, 1.0, dirShadow);
   Lo += evalLight(N, V, fillDir, vec3<f32>(0.45, 0.52, 0.65), albedo, metalness, roughness, F0);
   Lo += evalLight(N, V, rimDir, vec3<f32>(0.75, 0.80, 0.90), albedo, metalness, roughness, F0);
 
@@ -195,4 +291,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let mapped = acesToneMap(hdr);
   let srgb = pow(mapped, vec3<f32>(1.0 / 2.2));
   return vec4<f32>(srgb, baseColor.a);
+}
+
+@fragment
+fn fs_unlit(in: VertexOutput) -> @location(0) vec4<f32> {
+  return colors[in.entityId];
 }

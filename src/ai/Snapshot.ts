@@ -1,4 +1,4 @@
-﻿import type { Renderer, SnapshotLayer } from '../gpu/Renderer';
+import type { Renderer, SnapshotLayer } from '../gpu/Renderer';
 import type { Camera } from '../controls/OrbitControls';
 import type { Inspector, SceneDescription } from './Inspector';
 
