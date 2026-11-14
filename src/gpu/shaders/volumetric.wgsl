@@ -97,7 +97,7 @@ fn sampleCloudDensity(worldPos: vec3<f32>) -> f32 {
   var samplePos = worldPos * scale;
 
   if (mode > 0.5) {
-    // Spherical planetary cloud shell
+    // Spherical planetary cloud shell: uniform base rotation + bounded gentle shear (never winds into lines)
     let rel = worldPos - vol.cloudBounds.xyz;
     let r = length(rel);
     let rMin = vol.cloudBounds.w + minAlt;
@@ -106,11 +106,12 @@ fn sampleCloudDensity(worldPos: vec3<f32>) -> f32 {
       return 0.0;
     }
     heightFrac = (r - rMin) / (rMax - rMin);
-    // Swirl clouds gently around Y axis
-    let c = cos(t * 0.35);
-    let s = sin(t * 0.35);
+    let latNorm = rel.y / max(r, 1e-4);
+    let windAngle = t * 0.28 + sin(t * 0.18 + latNorm * 2.5) * 0.14;
+    let c = cos(windAngle);
+    let s = sin(windAngle);
     let spun = vec3<f32>(rel.x * c - rel.z * s, rel.y, rel.x * s + rel.z * c);
-    samplePos = spun * scale + vec3<f32>(t * 0.25, t * 0.08, -t * 0.18);
+    samplePos = spun * scale + vec3<f32>(t * 0.14, t * 0.11, -t * 0.12);
   } else {
     // Planar sky cloud slab
     if (worldPos.y < minAlt || worldPos.y > maxAlt) {
@@ -126,9 +127,17 @@ fn sampleCloudDensity(worldPos: vec3<f32>) -> f32 {
     return 0.0;
   }
 
-  let n = fbm3(samplePos);
-  let threshold = 1.0 - coverage;
-  let shaped = smoothstep(threshold, threshold + 0.32, n);
+  // Dynamic weather lifecycle: isotropic 3D domain-warped advection + buildup/dissipation + wispy edge erosion
+  let wx = fbm3(samplePos * 0.52 + vec3<f32>(t * 0.14, -t * 0.11, t * 0.15)) - 0.47;
+  let wz = fbm3(samplePos * 0.52 + vec3<f32>(-t * 0.12 + 5.3, t * 0.13 - 2.7, t * 0.10 + 1.9)) - 0.47;
+  let warpedPos = samplePos + vec3<f32>(wx, (wx - wz) * 0.5, wz) * 0.95;
+  let baseNoise = fbm3(warpedPos);
+  let lifecycle = fbm3(samplePos * 0.40 + vec3<f32>(-t * 0.20, t * 0.24, t * 0.18));
+  let edgeErosion = fbm3(warpedPos * 2.25 - vec3<f32>(t * 0.26, 0.0, t * 0.22));
+
+  let localCoverage = clamp(coverage + (lifecycle - 0.47) * 0.55, 0.05, 0.95);
+  let threshold = 1.0 - localCoverage;
+  let shaped = smoothstep(threshold, threshold + 0.30, baseNoise - (1.0 - edgeErosion) * 0.10);
   return shaped * profile * density;
 }
 
@@ -307,45 +316,7 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
   let cloudShadow = select(1.0, computeCloudShadow(hitWorld, sunDir), hasHit && cloudDensity > 0.0001);
   let shadowedBase = baseColor.rgb * mix(0.36, 1.0, cloudShadow);
 
-  // 3. Radial Screen-Space Volumetric Sunbeams / God Rays
-  var godRayGlow = vec3<f32>(0.0);
-  let godRayIntensity = vol.sunScreen.w;
-  if (godRayIntensity > 0.001 && vol.sunScreen.z > 0.0 && cosTheta > 0.05) {
-    let sunUV = vol.sunScreen.xy;
-    let sunDepth = vol.sunScreen.z;
-    let dims = vec2<f32>(textureDimensions(sceneDepthTex));
-    let maxCoord = vec2<i32>(dims) - vec2<i32>(1, 1);
-
-    // Distance falloff from sun center on screen + view-angle alignment
-    let toSun = sunUV - in.uv;
-    let screenDist = length(toSun);
-    let radialMask = exp(-screenDist * 1.45) * smoothstep(0.05, 0.72, cosTheta);
-
-    if (radialMask > 0.002) {
-      let raySteps = 20;
-      let deltaUV = toSun * (0.92 / f32(raySteps));
-      let rayJitter = fract(52.9829189 * fract(dot(in.fragPos.xy, vec2<f32>(0.06711056, 0.00583715))));
-      var sampleUV = in.uv + deltaUV * rayJitter;
-      var illumDecay = 1.0;
-      var accum = 0.0;
-
-      for (var s = 0; s < raySteps; s++) {
-        let clampedUV = clamp(sampleUV, vec2<f32>(0.0), vec2<f32>(1.0));
-        let pCoord = clamp(vec2<i32>(clampedUV * dims), vec2<i32>(0, 0), maxCoord);
-        let dSample = textureLoad(sceneDepthTex, pCoord, 0);
-        // Unoccluded if pixel is sky or at/beyond the sun sphere
-        let unoccluded = select(0.0, 1.0, dSample >= sunDepth - 0.015);
-        accum += unoccluded * illumDecay;
-        illumDecay *= 0.93;
-        sampleUV += deltaUV;
-      }
-
-      let rayStrength = (accum / f32(raySteps)) * radialMask * godRayIntensity;
-      godRayGlow = vec3<f32>(1.0, 0.88, 0.62) * rayStrength;
-    }
-  }
-
-  let finalRgb = shadowedBase * transmittance + scattered + godRayGlow;
+  let finalRgb = shadowedBase * transmittance + scattered;
   return vec4<f32>(finalRgb, baseColor.a);
 }
 

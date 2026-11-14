@@ -469,9 +469,11 @@ export class Engine {
     if (typeof cfg.target === 'string') {
       const id = resolveEntityId(cfg.target);
       if (id !== undefined) {
-        tx = this.store.positions[id * 3] ?? 0;
-        ty = this.store.positions[id * 3 + 1] ?? 0;
-        tz = this.store.positions[id * 3 + 2] ?? 0;
+        this.store.updateMatrices();
+        const mOff = id * 16;
+        tx = this.store.modelMatrices[mOff + 12] ?? 0;
+        ty = this.store.modelMatrices[mOff + 13] ?? 0;
+        tz = this.store.modelMatrices[mOff + 14] ?? 0;
       } else {
         warnings.push(`Unknown camera target "${cfg.target}"; targeting origin.`);
       }
@@ -545,19 +547,16 @@ export class Engine {
     let point: readonly [number, number, number];
     if (Array.isArray(target)) {
       point = target as readonly [number, number, number];
-    } else if (target instanceof EntityHandle) {
-      point = [
-        this.store.positions[target.id * 3] ?? 0,
-        this.store.positions[target.id * 3 + 1] ?? 0,
-        this.store.positions[target.id * 3 + 2] ?? 0,
-      ];
     } else {
-      const handle = this.get(target as string | number);
+      const handle =
+        target instanceof EntityHandle ? target : this.get(target as string | number);
       if (!handle) return null;
+      this.store.updateMatrices();
+      const mOff = handle.id * 16;
       point = [
-        this.store.positions[handle.id * 3] ?? 0,
-        this.store.positions[handle.id * 3 + 1] ?? 0,
-        this.store.positions[handle.id * 3 + 2] ?? 0,
+        this.store.modelMatrices[mOff + 12] ?? 0,
+        this.store.modelMatrices[mOff + 13] ?? 0,
+        this.store.modelMatrices[mOff + 14] ?? 0,
       ];
     }
 

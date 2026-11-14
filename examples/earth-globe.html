@@ -41,6 +41,12 @@
         font-size: 12px;
       }
       button:hover { border-color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
+      button.toggle-on {
+        border-color: rgba(56, 189, 248, 0.7);
+        background: rgba(14, 116, 144, 0.45);
+        color: #e0f2fe;
+      }
+      #hud { z-index: 10; }
       #pickInfo {
         padding: 8px;
         border-radius: 6px;
@@ -48,16 +54,49 @@
         font: 11px/1.4 monospace;
         color: #a5f3fc;
       }
+      #labelsLayer {
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        pointer-events: none;
+        overflow: hidden;
+      }
+      .world-label {
+        position: absolute;
+        top: 0;
+        left: 0;
+        transform: translate(-50%, -120%);
+        padding: 2px 7px;
+        border-radius: 999px;
+        background: rgba(8, 13, 26, 0.78);
+        border: 1px solid rgba(56, 189, 248, 0.45);
+        color: #e0f2fe;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+        pointer-events: auto;
+        cursor: pointer;
+        user-select: none;
+        transition: border-color 0.15s, background 0.15s;
+      }
+      .world-label:hover {
+        border-color: #fbbf24;
+        background: rgba(251, 191, 36, 0.22);
+      }
     </style>
   </head>
   <body>
     <canvas id="canvas"></canvas>
+    <div id="labelsLayer"></div>
     <div id="hud">
       <h1>Living Earth &amp; Atmosphere</h1>
-      <p>Cone pine forests &amp; peaks, translucent atmosphere, Torus orbit ring, starfield, city lights, flights &amp; live shadows.</p>
+      <p>Cone pine forests &amp; peaks, volumetric clouds &amp; god rays, Bloom glow, 3D-projected labels &amp; live shadows.</p>
       <div class="row">
         <button id="btnPause">Pause</button>
         <button id="btnSunOrbit">Sun Orbit: ON</button>
+        <button id="btnBloom" class="toggle-on">Bloom: ON</button>
+        <button id="btnLabels" class="toggle-on">Labels: ON</button>
         <button id="btnPlant">+ Plant Trees</button>
         <button id="btnFocusMoon">Focus Moon</button>
         <button id="btnFit">Focus Earth</button>
@@ -82,8 +121,11 @@
       } from '../src/index.ts';
 
       const pickInfo = document.getElementById('pickInfo');
+      const labelsLayer = document.getElementById('labelsLayer');
       const btnPause = document.getElementById('btnPause');
       const btnSunOrbit = document.getElementById('btnSunOrbit');
+      const btnBloom = document.getElementById('btnBloom');
+      const btnLabels = document.getElementById('btnLabels');
       const btnPlant = document.getElementById('btnPlant');
       const btnFocusMoon = document.getElementById('btnFocusMoon');
       const btnFit = document.getElementById('btnFit');
@@ -587,7 +629,7 @@
           cloudDensity: 3.1,
           cloudCoverage: 0.56,
           cloudScale: 1.45,
-          cloudSpeed: 0.16,
+          cloudSpeed: 0.34,
           scatter: 0.68,
         });
 
@@ -688,10 +730,32 @@
         app.add(Sphere({ id: 'iss-beacon', parent: 'iss', position: [0, 0.10, 0], radius: 0.02, color: '#38bdf8', emissive: 3.0 }));
 
         app.use(OrbitControls({ distance: 7.0, target: [0, 0, 0] }));
+        app.setBloom({ enabled: true, threshold: 0.80, intensity: 0.65, radius: 1.7 });
 
         let paused = false;
         let sunOrbit = true;
+        let bloomOn = true;
+        let labelsOn = true;
         let simTime = 0;
+
+        // 3D-projected HTML labels using app.project()
+        const labelTargets = [
+          { id: 'earth', text: 'Earth', dist: 7.0 },
+          { id: 'moon', text: 'Moon', dist: 2.2 },
+          { id: 'iss', text: 'ISS', dist: 1.8 },
+          { id: 'satellite', text: 'Sat', dist: 1.8 },
+          { id: 'sun', text: 'Sun', dist: 4.5 },
+        ].map((item) => {
+          const el = document.createElement('button');
+          el.className = 'world-label';
+          el.textContent = item.text;
+          el.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            app.focusCamera({ target: item.id, angle: 'front-elevated', distance: item.dist });
+          });
+          labelsLayer.appendChild(el);
+          return { ...item, el };
+        });
 
         btnPause.addEventListener('click', () => {
           paused = !paused;
@@ -700,6 +764,22 @@
         btnSunOrbit.addEventListener('click', () => {
           sunOrbit = !sunOrbit;
           btnSunOrbit.textContent = `Sun Orbit: ${sunOrbit ? 'ON' : 'OFF'}`;
+        });
+        btnBloom.addEventListener('click', () => {
+          bloomOn = !bloomOn;
+          app.setBloom({ enabled: bloomOn });
+          btnBloom.textContent = `Bloom: ${bloomOn ? 'ON' : 'OFF'}`;
+          btnBloom.classList.toggle('toggle-on', bloomOn);
+        });
+        const toggleLabels = () => {
+          labelsOn = !labelsOn;
+          labelsLayer.style.display = labelsOn ? 'block' : 'none';
+          btnLabels.textContent = `Labels: ${labelsOn ? 'ON' : 'OFF'}`;
+          btnLabels.classList.toggle('toggle-on', labelsOn);
+        };
+        btnLabels.addEventListener('click', toggleLabels);
+        window.addEventListener('keydown', (e) => {
+          if (e.key === 'l' || e.key === 'L') toggleLabels();
         });
         btnPlant.addEventListener('click', () => {
           for (let k = 0; k < 5; k++) {
@@ -712,42 +792,57 @@
         btnFit.addEventListener('click', () => app.focusCamera({ target: 'earth', angle: 'front-elevated', distance: 7.0 }));
 
         app.onTick((dt) => {
-          if (paused) return;
-          simTime += dt;
+          if (!paused) {
+            simTime += dt;
 
-          quat.fromEuler(earth.rotation, 0.18, simTime * 0.20, 0);
+            quat.fromEuler(earth.rotation, 0.18, simTime * 0.20, 0);
 
-          const mAngle = simTime * 0.35;
-          moon.setPosition(
-            Math.cos(mAngle) * moonOrbitR,
-            0.35 * Math.sin(mAngle),
-            Math.sin(mAngle) * moonOrbitR,
-          );
+            const mAngle = simTime * 0.35;
+            moon.setPosition(
+              Math.cos(mAngle) * moonOrbitR,
+              0.35 * Math.sin(mAngle),
+              Math.sin(mAngle) * moonOrbitR,
+            );
 
-          const sAngle = -simTime * 0.95;
-          sat.setPosition(
-            Math.cos(sAngle) * 2.55,
-            Math.sin(sAngle * 2) * 0.55,
-            Math.sin(sAngle) * 2.55,
-          );
-          quat.fromEuler(sat.rotation, 0, -sAngle, 0.3);
+            const sAngle = -simTime * 0.95;
+            sat.setPosition(
+              Math.cos(sAngle) * 2.55,
+              Math.sin(sAngle * 2) * 0.55,
+              Math.sin(sAngle) * 2.55,
+            );
+            quat.fromEuler(sat.rotation, 0, -sAngle, 0.3);
 
-          const issAngle = simTime * 0.72 + 2.1;
-          iss.setPosition(
-            Math.cos(issAngle) * 2.75,
-            Math.sin(issAngle) * 1.15,
-            Math.sin(issAngle) * 2.50,
-          );
-          quat.fromEuler(iss.rotation, 0.35, -issAngle, 0.2);
+            const issAngle = simTime * 0.72 + 2.1;
+            iss.setPosition(
+              Math.cos(issAngle) * 2.75,
+              Math.sin(issAngle) * 1.15,
+              Math.sin(issAngle) * 2.50,
+            );
+            quat.fromEuler(iss.rotation, 0.35, -issAngle, 0.2);
 
-          quat.fromEuler(sunMesh.rotation, 0.12, simTime * 0.08, 0);
-          if (sunOrbit) {
-            const sunA = simTime * 0.18 + 0.6;
-            const sx = Math.cos(sunA) * sunRadius;
-            const sy = 4.2 + Math.sin(sunA * 0.5) * 1.5;
-            const sz = Math.sin(sunA) * sunRadius;
-            sunLight.setPosition(sx, sy, sz);
-            sunMesh.setPosition(sx, sy, sz);
+            quat.fromEuler(sunMesh.rotation, 0.12, simTime * 0.08, 0);
+            if (sunOrbit) {
+              const sunA = simTime * 0.18 + 0.6;
+              const sx = Math.cos(sunA) * sunRadius;
+              const sy = 4.2 + Math.sin(sunA * 0.5) * 1.5;
+              const sz = Math.sin(sunA) * sunRadius;
+              sunLight.setPosition(sx, sy, sz);
+              sunMesh.setPosition(sx, sy, sz);
+            }
+          }
+
+          if (labelsOn) {
+            for (let i = 0; i < labelTargets.length; i++) {
+              const item = labelTargets[i];
+              const p = app.project(item.id);
+              if (!p || !p.visible) {
+                item.el.style.display = 'none';
+              } else {
+                item.el.style.display = 'block';
+                item.el.style.left = `${p.x.toFixed(1)}px`;
+                item.el.style.top = `${p.y.toFixed(1)}px`;
+              }
+            }
           }
         });
 
