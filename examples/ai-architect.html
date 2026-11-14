@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>therse3d — AI Scene Architect</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #0f172a;
+        color: #e2e8f0;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      #canvas { width: 100%; height: 100%; display: block; }
+      #hud {
+        position: fixed;
+        top: 14px;
+        left: 14px;
+        width: 360px;
+        max-height: calc(100vh - 28px);
+        overflow-y: auto;
+        padding: 14px;
+        background: rgba(15, 23, 42, 0.88);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(56, 189, 248, 0.25);
+        border-radius: 10px;
+        font-size: 13px;
+      }
+      h1 { margin: 0 0 4px; font-size: 15px; color: #38bdf8; }
+      .sub { margin: 0 0 10px; font-size: 12px; color: #94a3b8; }
+      .row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+      button {
+        cursor: pointer;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        background: rgba(30, 41, 59, 0.9);
+        color: #f8fafc;
+        padding: 6px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+      }
+      button:hover { border-color: #38bdf8; background: rgba(56, 189, 248, 0.16); }
+      pre {
+        margin: 0;
+        padding: 8px;
+        border-radius: 6px;
+        background: rgba(2, 6, 23, 0.72);
+        font-size: 11px;
+        max-height: 220px;
+        overflow: auto;
+        white-space: pre-wrap;
+        color: #cbd5e1;
+      }
+      #snapImg {
+        margin-top: 8px;
+        width: 100%;
+        border-radius: 6px;
+        border: 1px solid rgba(56, 189, 248, 0.35);
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div id="hud">
+      <h1>AI Scene Architect</h1>
+      <p class="sub">Declarative JSON scenes, ring/grid layouts, beside/on/avoidOverlap, studio-grid &amp; VLM snapshot.</p>
+      <div class="row">
+        <button id="btnRing">1. Conference Ring</button>
+        <button id="btnLab">2. Robotics Lab</button>
+        <button id="btnGallery">3. Grid Gallery</button>
+      </div>
+      <div class="row">
+        <button id="btnUndo">Undo</button>
+        <button id="btnDescribe">Describe()</button>
+        <button id="btnSnap">VLM Snapshot</button>
+      </div>
+      <pre id="output">Initializing WebGPU...</pre>
+      <img id="snapImg" alt="VLM Annotated Snapshot" />
+    </div>
+
+    <script type="module">
+      import { Engine, OrbitControls } from '../src/index.ts';
+
+      const output = document.getElementById('output');
+      const snapImg = document.getElementById('snapImg');
+
+      const SCENES = {
+        ring: {
+          preset: 'studio',
+          transition: 0.45,
+          camera: { target: 'table', angle: 'front-elevated', distance: 6.2 },
+          entities: [
+            { id: 'floor', type: 'plane', size: [14, 1, 14], position: [0, 0, 0], material: 'studio-grid' },
+            { id: 'table', type: 'cylinder', size: [2.2, 0.12, 2.2], position: [0, 0.75, 0], material: 'oak-wood' },
+            { id: 'base', type: 'cylinder', size: [0.4, 0.75, 0.4], position: [0, 0.375, 0], material: 'brushed-aluminum' },
+            { id: 'core-orb', type: 'sphere', radius: 0.22, on: 'table', align: 'center', material: 'emissive-neon' },
+            { id: 'chair-1', type: 'box', size: [0.55, 0.85, 0.55], position: [0, 0.425, 0], material: 'matte-plastic', color: '#3b82f6' },
+            { id: 'chair-2', type: 'box', size: [0.55, 0.85, 0.55], position: [0, 0.425, 0], material: 'matte-plastic', color: '#3b82f6' },
+            { id: 'chair-3', type: 'box', size: [0.55, 0.85, 0.55], position: [0, 0.425, 0], material: 'matte-plastic', color: '#3b82f6' },
+            { id: 'chair-4', type: 'box', size: [0.55, 0.85, 0.55], position: [0, 0.425, 0], material: 'matte-plastic', color: '#3b82f6' },
+            { id: 'chair-5', type: 'box', size: [0.55, 0.85, 0.55], position: [0, 0.425, 0], material: 'matte-plastic', color: '#3b82f6' },
+            { id: 'chair-6', type: 'box', size: [0.55, 0.85, 0.55], position: [0, 0.425, 0], material: 'matte-plastic', color: '#3b82f6' },
+          ],
+          layouts: [
+            { kind: 'ring', entities: ['chair-1', 'chair-2', 'chair-3', 'chair-4', 'chair-5', 'chair-6'], radius: 1.9, lookAtCenter: true },
+          ],
+        },
+        lab: {
+          preset: 'cad-blueprint',
+          transition: 0.45,
+          camera: { target: 'bench-main', angle: 'isometric', distance: 5.5 },
+          entities: [
+            { id: 'floor', type: 'plane', size: [14, 1, 14], position: [0, 0, 0], material: 'studio-grid' },
+            { id: 'bench-main', type: 'box', size: [2.2, 0.8, 1.0], position: [0, 0.4, 0], material: 'brushed-aluminum' },
+            { id: 'bench-side', type: 'box', size: [1.0, 0.8, 1.0], beside: 'bench-main', side: 'right', margin: 0.25, material: 'carbon-fiber' },
+            { id: 'bot-base', type: 'cylinder', size: [0.45, 0.25, 0.45], on: 'bench-main', align: 'center', material: 'carbon-fiber' },
+            { id: 'bot-head', type: 'sphere', radius: 0.2, on: 'bot-base', align: 'center', material: 'emissive-neon' },
+            { id: 'crate-a', type: 'box', size: [0.35, 0.35, 0.35], on: 'bench-side', align: 'center', material: 'oak-wood' },
+            { id: 'crate-b', type: 'box', size: [0.35, 0.35, 0.35], on: 'bench-side', align: 'center', avoidOverlap: true, material: 'polished-gold' },
+            { id: 'laser-ray', type: 'line', from: [0, 1.15, 0], to: [1.72, 1.0, 0], color: '#22d3ee' },
+          ],
+        },
+        gallery: {
+          preset: 'dark-ui',
+          transition: 0.45,
+          camera: { target: [0, 0.8, 0], angle: 'front-elevated', distance: 6.8 },
+          entities: [
+            { id: 'floor', type: 'plane', size: [14, 1, 14], position: [0, 0, 0], material: 'studio-grid' },
+            { id: 'ped-1', type: 'box', size: [0.7, 0.9, 0.7], position: [0, 0.45, 0], material: 'matte-ceramic' },
+            { id: 'ped-2', type: 'box', size: [0.7, 0.9, 0.7], position: [0, 0.45, 0], material: 'matte-ceramic' },
+            { id: 'ped-3', type: 'box', size: [0.7, 0.9, 0.7], position: [0, 0.45, 0], material: 'matte-ceramic' },
+            { id: 'ped-4', type: 'box', size: [0.7, 0.9, 0.7], position: [0, 0.45, 0], material: 'matte-ceramic' },
+            { id: 'ped-5', type: 'box', size: [0.7, 0.9, 0.7], position: [0, 0.45, 0], material: 'matte-ceramic' },
+            { id: 'ped-6', type: 'box', size: [0.7, 0.9, 0.7], position: [0, 0.45, 0], material: 'matte-ceramic' },
+            { id: 'art-1', type: 'sphere', radius: 0.24, on: 'ped-1', material: 'polished-gold' },
+            { id: 'art-2', type: 'cylinder', size: [0.35, 0.45, 0.35], on: 'ped-2', material: 'brushed-aluminum' },
+            { id: 'art-3', type: 'box', size: [0.36, 0.36, 0.36], on: 'ped-3', material: 'emissive-neon' },
+            { id: 'art-4', type: 'sphere', radius: 0.24, on: 'ped-4', material: 'carbon-fiber' },
+            { id: 'art-5', type: 'cylinder', size: [0.35, 0.45, 0.35], on: 'ped-5', material: 'oak-wood' },
+            { id: 'art-6', type: 'box', size: [0.36, 0.36, 0.36], on: 'ped-6', material: 'polished-gold' },
+          ],
+          layouts: [
+            { kind: 'grid', entities: ['ped-1', 'ped-2', 'ped-3', 'ped-4', 'ped-5', 'ped-6'], columns: 3, spacing: 1.8 },
+          ],
+        },
+      };
+
+      try {
+        const app = await Engine.create('#canvas', { preset: 'studio' });
+        app.use(OrbitControls({ distance: 6.2, target: [0, 0.6, 0] }));
+
+        const applyScene = (key) => {
+          const report = app.sync(SCENES[key]);
+          output.textContent = JSON.stringify(report, null, 2);
+        };
+
+        applyScene('ring');
+
+        document.getElementById('btnRing').addEventListener('click', () => applyScene('ring'));
+        document.getElementById('btnLab').addEventListener('click', () => applyScene('lab'));
+        document.getElementById('btnGallery').addEventListener('click', () => applyScene('gallery'));
+        document.getElementById('btnUndo').addEventListener('click', () => {
+          output.textContent = JSON.stringify(app.undo(), null, 2);
+        });
+        document.getElementById('btnDescribe').addEventListener('click', () => {
+          output.textContent = JSON.stringify(app.describe(), null, 2);
+        });
+        document.getElementById('btnSnap').addEventListener('click', async () => {
+          const snap = await app.snapshot({ layers: ['rgb', 'annotated'], resolution: [640, 360] });
+          if (snap.annotatedDataUrl) {
+            snapImg.src = snap.annotatedDataUrl;
+            snapImg.style.display = 'block';
+          }
+          output.textContent = `Snapshot: ${snap.width}x${snap.height}`;
+        });
+
+        app.gpu.canvas.addEventListener('click', (e) => {
+          const hit = app.pick(e.clientX, e.clientY);
+          if (hit) {
+            output.textContent = `Picked "${hit.id}" @ ${hit.distance.toFixed(2)}m`;
+          }
+        });
+      } catch (err) {
+        output.textContent = err instanceof Error ? err.message : String(err);
+      }
+    </script>
+  </body>
+</html>
+

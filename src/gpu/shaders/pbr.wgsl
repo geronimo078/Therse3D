@@ -25,6 +25,8 @@ struct SceneUniforms {
 @group(0) @binding(4) var<storage, read> instanceIds: array<u32>;
 @group(0) @binding(5) var shadowMap: texture_depth_2d;
 @group(0) @binding(6) var shadowSampler: sampler_comparison;
+@group(0) @binding(7) var albedoTextures: texture_2d_array<f32>;
+@group(0) @binding(8) var albedoSampler: sampler;
 
 struct VertexInput {
   @location(0) position: vec3<f32>,
@@ -149,8 +151,8 @@ fn computeDirectionalShadow(worldPos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> 
   let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
   let inBounds = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0 && ndc.z >= 0.0 && ndc.z <= 1.0;
 
-  let bias = max(0.002 * (1.0 - max(dot(N, L), 0.0)), 0.0005);
-  let texelSize = 1.0 / 1024.0;
+  let bias = max(0.0008 * (1.0 - max(dot(N, L), 0.0)), 0.00025);
+  let texelSize = 1.0 / 2048.0;
   var sum = 0.0;
   for (var y = -1; y <= 1; y++) {
     for (var x = -1; x <= 1; x++) {
@@ -232,12 +234,16 @@ fn applyProceduralMaterial(
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let baseColor = colors[in.entityId];
-  let params = pbrParams[in.entityId]; // [metalness, roughness, emissive, materialId]
+  let params = pbrParams[in.entityId]; // [metalness, roughness, emissive, materialId | (textureId << 8)]
+  let packedMatTex = u32(max(params.w + 0.5, 0.0));
+  let materialId = i32(packedMatTex & 255u);
+  let textureId = i32(packedMatTex >> 8u);
+  let texSample = textureSample(albedoTextures, albedoSampler, in.uv, textureId);
   let procMat = applyProceduralMaterial(
-    i32(params.w + 0.5),
+    materialId,
     in.worldPos,
     in.uv,
-    baseColor.rgb,
+    baseColor.rgb * texSample.rgb,
     clamp(params.y, 0.04, 1.0),
   );
   let albedo = procMat.rgb;
@@ -290,7 +296,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let hdr = ambient + Lo * mix(0.45, 1.0, contactShadow) + albedo * emissive;
   let mapped = acesToneMap(hdr);
   let srgb = pow(mapped, vec3<f32>(1.0 / 2.2));
-  return vec4<f32>(srgb, baseColor.a);
+  return vec4<f32>(srgb, baseColor.a * texSample.a);
 }
 
 @fragment

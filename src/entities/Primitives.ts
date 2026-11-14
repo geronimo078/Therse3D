@@ -5,7 +5,7 @@ import { DirtyFlag, type WorldStore } from '../core/WorldStore';
 import type { EntityHandle } from './EntityHandle';
 import type { MaterialDefinition, MaterialPresetName } from './Materials';
 
-export type PrimitiveType = 'box' | 'sphere' | 'cylinder' | 'plane' | 'line' | 'model' | 'group' | 'light';
+export type PrimitiveType = 'box' | 'sphere' | 'cylinder' | 'plane' | 'line' | 'model' | 'group' | 'light' | 'cone' | 'torus';
 export type LightKind = 'point' | 'directional' | 'spot';
 
 export interface PrimitiveOptions extends SpatialPlacement {
@@ -22,6 +22,7 @@ export interface PrimitiveOptions extends SpatialPlacement {
   emissive?: number;
   visible?: boolean;
   material?: MaterialPresetName | Partial<MaterialDefinition>;
+  texture?: string | number;
   kind?: LightKind;
   intensity?: number;
   range?: number;
@@ -74,6 +75,8 @@ export const Line = makeFactory('line');
 export const Model = makeFactory('model');
 export const Group = makeFactory('group');
 export const Light = makeFactory('light');
+export const Cone = makeFactory('cone');
+export const Torus = makeFactory('torus');
 
 /**
  * Prozeduraler Unit-Box-Generator (1x1x1 um Ursprung, 24 Vertices, 36 Indices).
@@ -168,11 +171,11 @@ export function createSphereGeometry(segments = 24, rings = 16): GeometryMeshDat
       const a = r * stride + s;
       const b = a + stride;
       indices[idx++] = a;
-      indices[idx++] = b;
       indices[idx++] = a + 1;
       indices[idx++] = b;
+      indices[idx++] = b;
+      indices[idx++] = a + 1;
       indices[idx++] = b + 1;
-      indices[idx++] = a + 1;
     }
   }
 
@@ -214,8 +217,8 @@ export function createCylinderGeometry(segments = 24): GeometryMeshData {
     const b = a + 1;
     const c = a + 2;
     const d = a + 3;
-    indices[idx++] = a; indices[idx++] = b; indices[idx++] = c;
-    indices[idx++] = b; indices[idx++] = d; indices[idx++] = c;
+    indices[idx++] = a; indices[idx++] = c; indices[idx++] = b;
+    indices[idx++] = b; indices[idx++] = c; indices[idx++] = d;
   }
 
   // Top cap
@@ -319,4 +322,133 @@ export function applyLineEndpoints(
 
   quat.fromLookAt(store.rotations, entityId * 4, fx, fy, fz, tx, ty, tz);
   store.markDirty(entityId, DirtyFlag.Transform | DirtyFlag.Bounds);
+}
+
+/**
+ * Prozeduraler Unit-Cone-Generator (Höhe 1.0, Basis-Radius 0.5).
+ */
+export function createConeGeometry(segments = 24): GeometryMeshData {
+  const radius = 0.5;
+  const halfH = 0.5;
+  const slopeLen = Math.hypot(1.0, radius);
+  const nySlope = radius / slopeLen;
+  const nrSlope = 1.0 / slopeLen;
+
+  const sideVerts = segments * 3;
+  const capVerts = segments + 2;
+  const vertices = new Float32Array((sideVerts + capVerts) * 8);
+  const indices = new Uint16Array(segments * 3 + segments * 3);
+
+  let v = 0;
+  let idx = 0;
+  for (let i = 0; i < segments; i++) {
+    const t0 = (i / segments) * Math.PI * 2;
+    const t1 = ((i + 1) / segments) * Math.PI * 2;
+    const tm = (t0 + t1) * 0.5;
+    const c0 = Math.cos(t0), s0 = Math.sin(t0);
+    const c1 = Math.cos(t1), s1 = Math.sin(t1);
+    const cm = Math.cos(tm), sm = Math.sin(tm);
+
+    const baseIdx = v / 8;
+    // Apex
+    vertices[v++] = 0; vertices[v++] = halfH; vertices[v++] = 0;
+    vertices[v++] = cm * nrSlope; vertices[v++] = nySlope; vertices[v++] = sm * nrSlope;
+    vertices[v++] = 0.5; vertices[v++] = 1;
+    // Base 0
+    vertices[v++] = c0 * radius; vertices[v++] = -halfH; vertices[v++] = s0 * radius;
+    vertices[v++] = c0 * nrSlope; vertices[v++] = nySlope; vertices[v++] = s0 * nrSlope;
+    vertices[v++] = i / segments; vertices[v++] = 0;
+    // Base 1
+    vertices[v++] = c1 * radius; vertices[v++] = -halfH; vertices[v++] = s1 * radius;
+    vertices[v++] = c1 * nrSlope; vertices[v++] = nySlope; vertices[v++] = s1 * nrSlope;
+    vertices[v++] = (i + 1) / segments; vertices[v++] = 0;
+
+    indices[idx++] = baseIdx;
+    indices[idx++] = baseIdx + 2;
+    indices[idx++] = baseIdx + 1;
+  }
+
+  // Bottom cap (-Y)
+  const botCenterIdx = v / 8;
+  vertices[v++] = 0; vertices[v++] = -halfH; vertices[v++] = 0;
+  vertices[v++] = 0; vertices[v++] = -1; vertices[v++] = 0;
+  vertices[v++] = 0.5; vertices[v++] = 0.5;
+
+  for (let i = 0; i <= segments; i++) {
+    const theta = (i / segments) * Math.PI * 2;
+    const cx = Math.cos(theta);
+    const cz = Math.sin(theta);
+    vertices[v++] = cx * radius; vertices[v++] = -halfH; vertices[v++] = cz * radius;
+    vertices[v++] = 0; vertices[v++] = -1; vertices[v++] = 0;
+    vertices[v++] = 0.5 + cx * 0.5; vertices[v++] = 0.5 + cz * 0.5;
+  }
+  for (let i = 0; i < segments; i++) {
+    indices[idx++] = botCenterIdx;
+    indices[idx++] = botCenterIdx + 1 + i;
+    indices[idx++] = botCenterIdx + 1 + i + 1;
+  }
+
+  return { vertices, indices };
+}
+
+/**
+ * Prozeduraler Unit-Torus-Generator (Gesamtdurchmesser 1.0 auf XZ-Ebene).
+ */
+export function createTorusGeometry(
+  radialSegments = 28,
+  tubularSegments = 14,
+  tubeRadius = 0.12,
+): GeometryMeshData {
+  const majorRadius = 0.5 - tubeRadius;
+  const vertCount = (radialSegments + 1) * (tubularSegments + 1);
+  const vertices = new Float32Array(vertCount * 8);
+  const indices = new Uint16Array(radialSegments * tubularSegments * 6);
+
+  let v = 0;
+  for (let i = 0; i <= radialSegments; i++) {
+    const u = i / radialSegments;
+    const phi = u * Math.PI * 2;
+    const cosPhi = Math.cos(phi);
+    const sinPhi = Math.sin(phi);
+
+    for (let j = 0; j <= tubularSegments; j++) {
+      const vt = j / tubularSegments;
+      const theta = vt * Math.PI * 2;
+      const cosTheta = Math.cos(theta);
+      const sinTheta = Math.sin(theta);
+
+      const nx = cosTheta * cosPhi;
+      const ny = sinTheta;
+      const nz = cosTheta * sinPhi;
+
+      const r = majorRadius + tubeRadius * cosTheta;
+      vertices[v++] = r * cosPhi;
+      vertices[v++] = tubeRadius * sinTheta;
+      vertices[v++] = r * sinPhi;
+      vertices[v++] = nx;
+      vertices[v++] = ny;
+      vertices[v++] = nz;
+      vertices[v++] = u;
+      vertices[v++] = vt;
+    }
+  }
+
+  let idx = 0;
+  const stride = tubularSegments + 1;
+  for (let i = 0; i < radialSegments; i++) {
+    for (let j = 0; j < tubularSegments; j++) {
+      const a = i * stride + j;
+      const b = a + stride;
+      const c = a + 1;
+      const d = b + 1;
+      indices[idx++] = a;
+      indices[idx++] = c;
+      indices[idx++] = b;
+      indices[idx++] = b;
+      indices[idx++] = c;
+      indices[idx++] = d;
+    }
+  }
+
+  return { vertices, indices };
 }

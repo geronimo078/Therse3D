@@ -39,7 +39,7 @@ export const THERSE3D_SCENE_SCHEMA = {
           id: { type: 'string' },
           type: {
             type: 'string',
-            enum: ['box', 'sphere', 'cylinder', 'plane', 'line', 'model', 'group', 'light'],
+            enum: ['box', 'sphere', 'cylinder', 'plane', 'line', 'model', 'group', 'light', 'cone', 'torus'],
           },
           parent: { type: 'string' },
           src: { type: 'string' },
@@ -73,6 +73,9 @@ export const THERSE3D_SCENE_SCHEMA = {
           material: {
             type: 'string',
             enum: Object.keys(MATERIAL_PRESETS),
+          },
+          texture: {
+            oneOf: [{ type: 'string' }, { type: 'integer', minimum: 0 }],
           },
           on: { type: 'string' },
           beside: { type: 'string' },
@@ -195,7 +198,7 @@ export class Schema {
     const materials = Object.keys(MATERIAL_PRESETS).join(', ');
     const lines = [
       'therse3d AI-Native WebGPU 3D Engine',
-      'Primitives: box, sphere, cylinder, plane, line, model, group, light',
+      'Primitives: box, sphere, cylinder, plane, cone, torus, line, model, group, light',
       `Materials: ${materials}`,
       'Hierarchy & Layout: parent, on (entityId|"floor"), beside (entityId + side: left|right|front|back), inside (entityId), avoidOverlap, align, margin, offset [dx,dy,dz], lookAt, layouts (grid|ring|row)',
       'Presets: studio, outdoor, dark-ui, cad-blueprint, minimal',

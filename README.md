@@ -9,7 +9,7 @@
 ## Features
 
 - **Zero-Dependency Core:** Pure TypeScript + WGSL with zero runtime dependencies.
-- **WebGPU-First Instanced PBR Renderer:** Cook-Torrance PBR shading, 3-point studio lighting, hemisphere ambient, ACES filmic tone mapping, 4x MSAA, and automatic GPU instancing per geometry type.
+- **WebGPU-First Instanced PBR Renderer:** Cook-Torrance PBR shading, 3-point studio lighting, hemisphere ambient, 2048px directional shadow mapping, alpha-blended transparent pass, `texture_2d_array` albedo textures (`app.loadTexture()` / `app.registerTexture()`), ACES filmic tone mapping, 4x MSAA, and automatic GPU instancing per geometry type (`Box`, `Sphere`, `Cylinder`, `Plane`, `Line`, `Cone`, `Torus`, `Model`, `Group`, `Light`).
 - **Data-Oriented ECS (`WorldStore`):** Contiguous `Float32Array` / `Uint8Array` buffers (`positions`, `rotations`, `scales`, `modelMatrices`, `colors`, `pbrParams`, `boundsMin`, `boundsMax`, `dirtyFlags`) with free-list ID recycling and zero-allocation render-loop updates.
 - **Relative Spatial Layout (`SpatialLayout`):** Place objects relative to each other (`on`, `align`, `margin`, `offset`, `lookAt`) with topological sorting instead of manual coordinate math.
 - **Declarative `app.sync()` & Auto-Healing:** Idempotent JSON scene synchronization with diffing, smoothstep auto-tweening, and structured `warnings[]` instead of runtime crashes.
@@ -101,6 +101,8 @@ With `npm run dev` running, open:
 - `http://localhost:5173/examples/basic.html` — Minimal scene setup
 - `http://localhost:5173/examples/ai-sync.html` — Declarative JSON scene sync demo
 - `http://localhost:5173/examples/vlm-vision.html` — Spatial inspector & snapshot demo
+- `http://localhost:5173/examples/ai-architect.html` — Interactive AI Architect with live JSON `sync()`, `describe()`, and `snapshot()`
+- `http://localhost:5173/examples/earth-globe.html` — Living Earth planet with 3D `.glb` terrain & tree assets, textured Moon, atmosphere/auroras, dynamic sun & 2048px shadows
 
 ---
 

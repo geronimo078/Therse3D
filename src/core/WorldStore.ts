@@ -22,6 +22,8 @@ export const enum GeometryTypeId {
   Model = 5,
   Group = 6,
   Light = 7,
+  Cone = 8,
+  Torus = 9,
 }
 
 export const enum LightKindId {
@@ -51,6 +53,7 @@ export class WorldStore {
   geometryTypes: Uint8Array;
   parentIds: Int32Array;
   meshIds: Int32Array;
+  textureIds: Uint16Array;
 
   private readonly freeList: number[] = [];
   private readonly localMatScratch = new Float32Array(16);
@@ -75,6 +78,7 @@ export class WorldStore {
     this.parentIds.fill(-1);
     this.meshIds = new Int32Array(this.capacity);
     this.meshIds.fill(-1);
+    this.textureIds = new Uint16Array(this.capacity);
     this.updatedThisPass = new Uint8Array(this.capacity);
   }
 
@@ -122,6 +126,7 @@ export class WorldStore {
 
     this.parentIds[id] = -1;
     this.meshIds[id] = -1;
+    this.textureIds[id] = 0;
 
     mat4.identity(this.modelMatrices, id * 16);
     aabb.fromCenterHalfExtents(this.boundsMin, this.boundsMax, pIdx, 0, 0, 0, 0.5, 0.5, 0.5);
@@ -138,6 +143,7 @@ export class WorldStore {
     this.dirtyFlags[id] = DirtyFlag.None;
     this.parentIds[id] = -1;
     this.meshIds[id] = -1;
+    this.textureIds[id] = 0;
     this.count--;
     this.freeList.push(id);
   }
@@ -296,6 +302,16 @@ export class WorldStore {
     return count + 1;
   }
 
+  setTextureId(id: number, textureId: number): void {
+    if (id < 0 || id >= this.highWaterMark || this.alive[id] === 0) return;
+    const clamped = Math.max(0, Math.min(65535, Math.floor(textureId)));
+    this.textureIds[id] = clamped;
+    const pIdx = id * 4 + 3;
+    const matId = Math.floor(this.pbrParams[pIdx] ?? 0) & 0xff;
+    this.pbrParams[pIdx] = matId + clamped * 256;
+    this.dirtyFlags[id] = (this.dirtyFlags[id] ?? 0) | DirtyFlag.Material;
+  }
+
   private grow(): void {
     const nextCap = this.capacity * 2;
     this.positions = growFloat32(this.positions, nextCap * 3);
@@ -321,6 +337,10 @@ export class WorldStore {
     nextMeshIds.fill(-1);
     nextMeshIds.set(this.meshIds);
     this.meshIds = nextMeshIds;
+
+    const nextTextureIds = new Uint16Array(nextCap);
+    nextTextureIds.set(this.textureIds);
+    this.textureIds = nextTextureIds;
 
     this.updatedThisPass = new Uint8Array(nextCap);
 

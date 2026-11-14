@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   applyLineEndpoints,
   createBoxGeometry,
+  createConeGeometry,
   createCylinderGeometry,
   createLineGeometry,
   createPlaneGeometry,
   createSphereGeometry,
+  createTorusGeometry,
 } from './Primitives';
 import { WorldStore } from '../core/WorldStore';
 import { parseColor, resolveMaterial } from './Materials';
@@ -31,6 +33,50 @@ describe('Procedural Primitives (Schritt 2)', () => {
     const line = createLineGeometry();
     expect(line.vertices.length).toBe(2 * 8);
     expect(line.indices.length).toBe(2);
+
+    const cone = createConeGeometry(12);
+    expect(cone.vertices.length).toBeGreaterThan(0);
+    expect(cone.indices.length).toBe(12 * 6);
+
+    const torus = createTorusGeometry(16, 8);
+    expect(torus.vertices.length).toBe(17 * 9 * 8);
+    expect(torus.indices.length).toBe(16 * 8 * 6);
+  });
+
+  it('uses outward-facing CCW triangle winding for Box, Sphere, Cylinder, Plane, Cone, and Torus', () => {
+    const meshes = [
+      createBoxGeometry(),
+      createSphereGeometry(12, 8),
+      createCylinderGeometry(12),
+      createPlaneGeometry(),
+      createConeGeometry(12),
+      createTorusGeometry(16, 8),
+    ];
+
+    for (const mesh of meshes) {
+      for (let i = 0; i < mesh.indices.length; i += 3) {
+        const i0 = mesh.indices[i]! * 8;
+        const i1 = mesh.indices[i + 1]! * 8;
+        const i2 = mesh.indices[i + 2]! * 8;
+
+        const ax = mesh.vertices[i1]! - mesh.vertices[i0]!;
+        const ay = mesh.vertices[i1 + 1]! - mesh.vertices[i0 + 1]!;
+        const az = mesh.vertices[i1 + 2]! - mesh.vertices[i0 + 2]!;
+        const bx = mesh.vertices[i2]! - mesh.vertices[i0]!;
+        const by = mesh.vertices[i2 + 1]! - mesh.vertices[i0 + 1]!;
+        const bz = mesh.vertices[i2 + 2]! - mesh.vertices[i0 + 2]!;
+
+        const cx = ay * bz - az * by;
+        const cy = az * bx - ax * bz;
+        const cz = ax * by - ay * bx;
+
+        const nx = mesh.vertices[i0 + 3]! + mesh.vertices[i1 + 3]! + mesh.vertices[i2 + 3]!;
+        const ny = mesh.vertices[i0 + 4]! + mesh.vertices[i1 + 4]! + mesh.vertices[i2 + 4]!;
+        const nz = mesh.vertices[i0 + 5]! + mesh.vertices[i1 + 5]! + mesh.vertices[i2 + 5]!;
+
+        expect(cx * nx + cy * ny + cz * nz).toBeGreaterThanOrEqual(0);
+      }
+    }
   });
 
   it('computes midpoint, length scale, and orientation for Line endpoints', () => {

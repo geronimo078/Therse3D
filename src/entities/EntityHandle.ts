@@ -125,6 +125,14 @@ export class EntityHandle {
     return this;
   }
 
+  get texture(): number {
+    return this.store.textureIds[this.id] ?? 0;
+  }
+
+  set texture(textureId: number) {
+    this.store.setTextureId(this.id, textureId);
+  }
+
   destroy(): void {
     this.store.free(this.id);
   }

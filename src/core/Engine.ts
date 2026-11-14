@@ -53,6 +53,8 @@ const PRIMITIVE_TYPE_MAP: Record<PrimitiveType, GeometryTypeId> = {
   model: GeometryTypeId.Model,
   group: GeometryTypeId.Group,
   light: GeometryTypeId.Light,
+  cone: GeometryTypeId.Cone,
+  torus: GeometryTypeId.Torus,
 };
 
 /**
@@ -76,6 +78,7 @@ export class Engine {
   private readonly entitiesById = new Map<number, EntityHandle>();
   private readonly entitiesByName = new Map<string, EntityHandle>();
   private readonly pluginCleanups: Array<() => void> = [];
+  private readonly textureCache = new Map<string, number>();
   private readonly gltfLoader = new GltfLoader();
   private readonly modelCache = new Map<string, number>();
 
@@ -174,7 +177,10 @@ export class Engine {
       descriptor.emissive !== undefined && Number.isFinite(descriptor.emissive)
         ? Math.max(0, descriptor.emissive)
         : mat.emissive;
-    this.store.pbrParams[cIdx + 3] = mat.materialId;
+    this.store.pbrParams[cIdx + 3] = (mat.materialId & 0xff) + (this.store.textureIds[id] ?? 0) * 256;
+    if (descriptor.texture !== undefined) {
+      this.applyTextureRef(id, descriptor.texture);
+    }
 
     if (descriptor.type === 'light') {
       this.store.lightParams[cIdx] =
@@ -319,7 +325,60 @@ export class Engine {
       onModelRef: (entityId, url, mesh, warnings) => {
         this.applyModelRef(entityId, url, mesh, warnings);
       },
+      onTextureRef: (entityId, texture, warnings) => {
+        this.applyTextureRef(entityId, texture, warnings);
+      },
     };
+  }
+
+  registerTexture(
+    source: ImageBitmap | HTMLCanvasElement | OffscreenCanvas | Uint8Array | Uint8ClampedArray,
+    width?: number,
+    height?: number,
+  ): number {
+    return this.renderer.registerTexture(source, width, height);
+  }
+
+  async loadTexture(url: string): Promise<number> {
+    const cached = this.textureCache.get(url);
+    if (cached !== undefined) return cached;
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch texture "${url}" (${response.status}).`);
+    }
+    const blob = await response.blob();
+    const bitmap = await createImageBitmap(blob, { imageOrientation: 'none' });
+    const texId = this.renderer.registerTexture(bitmap);
+    bitmap.close();
+    this.textureCache.set(url, texId);
+    return texId;
+  }
+
+  private applyTextureRef(entityId: number, texture: string | number, warnings?: string[]): void {
+    if (typeof texture === 'number') {
+      this.store.setTextureId(entityId, texture);
+      return;
+    }
+    if (!texture) return;
+
+    const cached = this.textureCache.get(texture);
+    if (cached !== undefined) {
+      this.store.setTextureId(entityId, cached);
+      return;
+    }
+
+    void this.loadTexture(texture)
+      .then((texId) => {
+        if (this.store.alive[entityId] === 1) {
+          this.store.setTextureId(entityId, texId);
+        }
+      })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        warnings?.push(`Failed to load texture "${texture}": ${msg}`);
+        console.warn(`therse3d: Failed to load texture "${texture}": ${msg}`);
+      });
   }
 
   async loadModel(url: string): Promise<number> {

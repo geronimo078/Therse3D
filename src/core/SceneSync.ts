@@ -27,6 +27,7 @@ export interface SceneSyncNode extends SpatialPlacement {
   emissive?: number;
   visible?: boolean;
   material?: string;
+  texture?: string | number;
   kind?: LightKind;
   intensity?: number;
   range?: number;
@@ -67,6 +68,7 @@ export interface SceneSyncHooks {
   onEntityCreated?: (name: string, entityId: number) => void;
   onEntityRemoved?: (name: string, entityId: number) => void;
   onModelRef?: (entityId: number, url: string | undefined, mesh: GeometryMeshData | undefined, warnings: string[]) => void;
+  onTextureRef?: (entityId: number, texture: string | number, warnings: string[]) => void;
 }
 
 const VALID_TYPE_MAP: Record<string, GeometryTypeId> = {
@@ -78,6 +80,8 @@ const VALID_TYPE_MAP: Record<string, GeometryTypeId> = {
   model: GeometryTypeId.Model,
   group: GeometryTypeId.Group,
   light: GeometryTypeId.Light,
+  cone: GeometryTypeId.Cone,
+  torus: GeometryTypeId.Torus,
 };
 
 const LIGHT_KIND_MAP: Record<string, LightKindId> = {
@@ -428,7 +432,14 @@ export class SceneSync {
         node.emissive !== undefined
           ? Math.max(0, sanitizeNum(node.emissive, mat.emissive, `${node.id}.emissive`, warnings))
           : mat.emissive;
-      store.pbrParams[qIdx + 3] = mat.materialId;
+      store.pbrParams[qIdx + 3] = (mat.materialId & 0xff) + (store.textureIds[entityId] ?? 0) * 256;
+      if (node.texture !== undefined) {
+        if (typeof node.texture === 'number') {
+          store.setTextureId(entityId, node.texture);
+        } else {
+          hooks?.onTextureRef?.(entityId, node.texture, warnings);
+        }
+      }
 
       // Target Position & Rotation
       if (node.position !== undefined) {

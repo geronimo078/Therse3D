@@ -4,10 +4,12 @@ import { GeometryTypeId, type WorldStore } from '../core/WorldStore';
 import { BufferManager } from './BufferManager';
 import {
   createBoxGeometry,
+  createConeGeometry,
   createCylinderGeometry,
   createLineGeometry,
   createPlaneGeometry,
   createSphereGeometry,
+  createTorusGeometry,
   type GeometryMeshData,
 } from '../entities/Primitives';
 import type { EnginePreset } from '../core/Engine';
@@ -73,6 +75,8 @@ const MESH_TYPES = [
   GeometryTypeId.Sphere,
   GeometryTypeId.Cylinder,
   GeometryTypeId.Plane,
+  GeometryTypeId.Cone,
+  GeometryTypeId.Torus,
 ] as const;
 
 export type SnapshotLayer = 'rgb' | 'annotated' | 'depth' | 'ids';
@@ -86,7 +90,9 @@ export interface CapturePassResult {
 }
 
 const MSAA_SAMPLE_COUNT = 4;
-const SHADOW_MAP_SIZE = 1024;
+const SHADOW_MAP_SIZE = 2048;
+const TEXTURE_SIZE = 512;
+const MAX_TEXTURES = 32;
 
 /**
  * WebGPU Instanced PBR-Renderer mit MSAA (4x), Depth-Buffer & Zero-Allocation Render-Loop.
@@ -100,6 +106,7 @@ export class Renderer {
 
   private preset: EnginePreset;
   private readonly pipeline: GPURenderPipeline;
+  private readonly transparentPipeline: GPURenderPipeline;
   private readonly linePipeline: GPURenderPipeline;
   private readonly shadowPipeline: GPURenderPipeline;
   private readonly bindGroupLayout: GPUBindGroupLayout;
@@ -123,6 +130,10 @@ export class Renderer {
   private readonly shadowTexture: GPUTexture;
   private readonly shadowView: GPUTextureView;
   private readonly shadowSampler: GPUSampler;
+  private readonly albedoTextureArray: GPUTexture;
+  private readonly albedoTextureView: GPUTextureView;
+  private readonly albedoSampler: GPUSampler;
+  private nextTextureLayer = 1;
 
   private allocatedCapacity = 0;
   private modelBuffer!: GPUBuffer;
@@ -133,9 +144,12 @@ export class Renderer {
   private shadowBindGroup!: GPUBindGroup;
 
   // Pre-allocated CPU scratch buffers for zero-allocation instancing bucketing
-  private readonly bucketCounts = new Uint32Array(8);
-  private readonly bucketOffsets = new Uint32Array(8);
-  private readonly bucketCursors = new Uint32Array(8);
+  private readonly bucketCounts = new Uint32Array(12);
+  private readonly bucketOffsets = new Uint32Array(12);
+  private readonly bucketCursors = new Uint32Array(12);
+  private readonly transCounts = new Uint32Array(12);
+  private readonly transOffsets = new Uint32Array(12);
+  private readonly transCursors = new Uint32Array(12);
   private packedInstanceIds!: Uint32Array;
 
   // Render target textures (recreated on canvas resize)
@@ -170,6 +184,36 @@ export class Renderer {
       minFilter: 'linear',
     });
 
+    this.albedoTextureArray = this.buffers.createTexture({
+      label: 'albedo-texture-array',
+      size: [TEXTURE_SIZE, TEXTURE_SIZE, MAX_TEXTURES],
+      format: 'rgba8unorm-srgb',
+      usage:
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_DST |
+        GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    // Layer 0 = solid white fallback so untextured entities sample (1, 1, 1, 1)
+    const whiteLayer = new Uint8Array(TEXTURE_SIZE * TEXTURE_SIZE * 4);
+    whiteLayer.fill(255);
+    gpu.device.queue.writeTexture(
+      { texture: this.albedoTextureArray, origin: [0, 0, 0] },
+      whiteLayer,
+      { bytesPerRow: TEXTURE_SIZE * 4, rowsPerImage: TEXTURE_SIZE },
+      [TEXTURE_SIZE, TEXTURE_SIZE, 1],
+    );
+    this.albedoTextureView = this.albedoTextureArray.createView({
+      dimension: '2d-array',
+      arrayLayerCount: MAX_TEXTURES,
+    });
+    this.albedoSampler = gpu.device.createSampler({
+      label: 'albedo-sampler',
+      magFilter: 'linear',
+      minFilter: 'linear',
+      addressModeU: 'repeat',
+      addressModeV: 'repeat',
+    });
+
     this.bindGroupLayout = gpu.device.createBindGroupLayout({
       label: 'pbr-bind-group-layout',
       entries: [
@@ -180,6 +224,8 @@ export class Renderer {
         { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
         { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
+        { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+        { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
       ],
     });
 
@@ -226,6 +272,50 @@ export class Renderer {
       depthStencil: {
         format: 'depth24plus',
         depthWriteEnabled: true,
+        depthCompare: 'less',
+      },
+      multisample: {
+        count: MSAA_SAMPLE_COUNT,
+      },
+    });
+
+    this.transparentPipeline = gpu.device.createRenderPipeline({
+      label: 'pbr-transparent-pipeline',
+      layout: gpu.device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] }),
+      vertex: {
+        module: shaderModule,
+        entryPoint: 'vs_main',
+        buffers: [
+          {
+            arrayStride: 8 * 4,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 3 * 4, format: 'float32x3' },
+              { shaderLocation: 2, offset: 6 * 4, format: 'float32x2' },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: 'fs_main',
+        targets: [
+          {
+            format: gpu.format,
+            blend: {
+              color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            },
+          },
+        ],
+      },
+      primitive: {
+        topology: 'triangle-list',
+        cullMode: 'back',
+      },
+      depthStencil: {
+        format: 'depth24plus',
+        depthWriteEnabled: false,
         depthCompare: 'less',
       },
       multisample: {
@@ -301,6 +391,8 @@ export class Renderer {
     this.uploadPrimitiveMesh(GeometryTypeId.Cylinder, createCylinderGeometry(), 'cylinder');
     this.uploadPrimitiveMesh(GeometryTypeId.Plane, createPlaneGeometry(), 'plane');
     this.uploadPrimitiveMesh(GeometryTypeId.Line, createLineGeometry(), 'line');
+    this.uploadPrimitiveMesh(GeometryTypeId.Cone, createConeGeometry(), 'cone');
+    this.uploadPrimitiveMesh(GeometryTypeId.Torus, createTorusGeometry(), 'torus');
 
     this.ensureStorageCapacity(store.capacity);
   }
@@ -341,6 +433,75 @@ export class Renderer {
     this.customMeshes.delete(meshId);
   }
 
+  registerTexture(
+    source: ImageBitmap | HTMLCanvasElement | OffscreenCanvas | Uint8Array | Uint8ClampedArray,
+    width?: number,
+    height?: number,
+  ): number {
+    if (this.nextTextureLayer >= MAX_TEXTURES) {
+      console.warn(`therse3d: Texture array capacity (${MAX_TEXTURES - 1}) reached; falling back to default texture.`);
+      return 0;
+    }
+    const layer = this.nextTextureLayer++;
+
+    if (source instanceof Uint8Array || source instanceof Uint8ClampedArray) {
+      const w = Math.max(1, width ?? TEXTURE_SIZE);
+      const h = Math.max(1, height ?? TEXTURE_SIZE);
+      if (w === TEXTURE_SIZE && h === TEXTURE_SIZE) {
+        this.gpu.device.queue.writeTexture(
+          { texture: this.albedoTextureArray, origin: [0, 0, layer] },
+          source.buffer as ArrayBuffer,
+          { offset: source.byteOffset, bytesPerRow: TEXTURE_SIZE * 4, rowsPerImage: TEXTURE_SIZE },
+          [TEXTURE_SIZE, TEXTURE_SIZE, 1],
+        );
+      } else {
+        // Nearest/bilinear resample into 512x512 RGBA8 buffer
+        const resampled = new Uint8Array(TEXTURE_SIZE * TEXTURE_SIZE * 4);
+        for (let y = 0; y < TEXTURE_SIZE; y++) {
+          const sy = Math.min(h - 1, Math.floor((y / TEXTURE_SIZE) * h));
+          for (let x = 0; x < TEXTURE_SIZE; x++) {
+            const sx = Math.min(w - 1, Math.floor((x / TEXTURE_SIZE) * w));
+            const sOff = (sy * w + sx) * 4;
+            const dOff = (y * TEXTURE_SIZE + x) * 4;
+            resampled[dOff] = source[sOff] ?? 255;
+            resampled[dOff + 1] = source[sOff + 1] ?? 255;
+            resampled[dOff + 2] = source[sOff + 2] ?? 255;
+            resampled[dOff + 3] = source[sOff + 3] ?? 255;
+          }
+        }
+        this.gpu.device.queue.writeTexture(
+          { texture: this.albedoTextureArray, origin: [0, 0, layer] },
+          resampled,
+          { bytesPerRow: TEXTURE_SIZE * 4, rowsPerImage: TEXTURE_SIZE },
+          [TEXTURE_SIZE, TEXTURE_SIZE, 1],
+        );
+      }
+      return layer;
+    }
+
+    let uploadSource: ImageBitmap | HTMLCanvasElement | OffscreenCanvas = source;
+    if (source.width !== TEXTURE_SIZE || source.height !== TEXTURE_SIZE) {
+      const canvas =
+        typeof OffscreenCanvas !== 'undefined'
+          ? new OffscreenCanvas(TEXTURE_SIZE, TEXTURE_SIZE)
+          : document.createElement('canvas');
+      canvas.width = TEXTURE_SIZE;
+      canvas.height = TEXTURE_SIZE;
+      const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+      if (ctx) {
+        ctx.drawImage(source, 0, 0, TEXTURE_SIZE, TEXTURE_SIZE);
+        uploadSource = canvas;
+      }
+    }
+
+    this.gpu.device.queue.copyExternalImageToTexture(
+      { source: uploadSource, flipY: false },
+      { texture: this.albedoTextureArray, origin: [0, 0, layer] },
+      [TEXTURE_SIZE, TEXTURE_SIZE],
+    );
+    return layer;
+  }
+
   private ensureStorageCapacity(capacity: number): void {
     if (this.allocatedCapacity >= capacity) return;
 
@@ -370,6 +531,8 @@ export class Renderer {
         { binding: 4, resource: { buffer: this.instanceIdBuffer } },
         { binding: 5, resource: this.shadowView },
         { binding: 6, resource: this.shadowSampler },
+        { binding: 7, resource: this.albedoTextureView },
+        { binding: 8, resource: this.albedoSampler },
       ],
     });
 
@@ -449,7 +612,11 @@ export class Renderer {
     const counts = this.bucketCounts;
     const offsets = this.bucketOffsets;
     const cursors = this.bucketCursors;
+    const tCounts = this.transCounts;
+    const tOffsets = this.transOffsets;
+    const tCursors = this.transCursors;
     counts.fill(0);
+    tCounts.fill(0);
 
     let dynamicLightCount = 0;
     let shadowCasterCount = 0;
@@ -471,23 +638,40 @@ export class Renderer {
       for (let id = 0; id < n; id++) {
         if (alive[id] === 0 || vis[id] === 0) continue;
         const gType = gTypes[id] ?? 0;
-        if (gType < 8) {
-          counts[gType] = (counts[gType] ?? 0) + 1;
+        const alpha = cols[id * 4 + 3] ?? 1;
+        const isTransparent = alpha < 0.995 && gType !== GeometryTypeId.Line && gType !== GeometryTypeId.Light;
+        if (gType < 12) {
+          if (isTransparent) {
+            tCounts[gType] = (tCounts[gType] ?? 0) + 1;
+          } else {
+            counts[gType] = (counts[gType] ?? 0) + 1;
+          }
         }
 
         if (gType === GeometryTypeId.Light && dynamicLightCount < 8) {
           const base = 40 + dynamicLightCount * 8;
           const mOff = id * 16;
           const cOff = id * 4;
-          u[base + 0] = mats[mOff + 12] ?? 0;
-          u[base + 1] = mats[mOff + 13] ?? 0;
-          u[base + 2] = mats[mOff + 14] ?? 0;
-          u[base + 3] = lParams[cOff] ?? 0; // kind: 0 = point, 1 = directional
+          const lx = mats[mOff + 12] ?? 0;
+          const ly = mats[mOff + 13] ?? 0;
+          const lz = mats[mOff + 14] ?? 0;
+          const kind = lParams[cOff] ?? 0;
+          u[base + 0] = lx;
+          u[base + 1] = ly;
+          u[base + 2] = lz;
+          u[base + 3] = kind; // kind: 0 = point, 1 = directional
           u[base + 4] = cols[cOff] ?? 1;
           u[base + 5] = cols[cOff + 1] ?? 1;
           u[base + 6] = cols[cOff + 2] ?? 1;
           u[base + 7] = lParams[cOff + 1] ?? 1; // intensity
           dynamicLightCount++;
+
+          if (kind > 0.5 && Math.hypot(lx, ly, lz) > 1e-4) {
+            u[28] = lx;
+            u[29] = ly;
+            u[30] = lz;
+            u[31] = 0;
+          }
         } else if (
           (gType === GeometryTypeId.Box || gType === GeometryTypeId.Sphere || gType === GeometryTypeId.Cylinder) &&
           shadowCasterCount < 16
@@ -508,10 +692,15 @@ export class Renderer {
       }
 
       let totalVisible = 0;
-      for (let t = 0; t < 8; t++) {
+      for (let t = 0; t < 12; t++) {
         offsets[t] = totalVisible;
         cursors[t] = totalVisible;
         totalVisible += counts[t] ?? 0;
+      }
+      for (let t = 0; t < 12; t++) {
+        tOffsets[t] = totalVisible;
+        tCursors[t] = totalVisible;
+        totalVisible += tCounts[t] ?? 0;
       }
 
       if (totalVisible > 0) {
@@ -519,10 +708,18 @@ export class Renderer {
         for (let id = 0; id < n; id++) {
           if (alive[id] === 0 || vis[id] === 0) continue;
           const gType = gTypes[id] ?? 0;
-          if (gType < 8) {
-            const dst = cursors[gType] ?? 0;
-            packed[dst] = id;
-            cursors[gType] = dst + 1;
+          if (gType < 12) {
+            const alpha = cols[id * 4 + 3] ?? 1;
+            const isTransparent = alpha < 0.995 && gType !== GeometryTypeId.Line && gType !== GeometryTypeId.Light;
+            if (isTransparent) {
+              const dst = tCursors[gType] ?? 0;
+              packed[dst] = id;
+              tCursors[gType] = dst + 1;
+            } else {
+              const dst = cursors[gType] ?? 0;
+              packed[dst] = id;
+              cursors[gType] = dst + 1;
+            }
           }
         }
         this.buffers.writeBuffer(this.instanceIdBuffer, packed, 0, 0, totalVisible);
@@ -533,7 +730,7 @@ export class Renderer {
     u[37] = shadowCasterCount;
     u[38] = 0;
     u[39] = 0;
-    this.writeLightViewProj(presetCfg.keyLightDir);
+    this.writeLightViewProj(u[28] ?? 0.5, u[29] ?? 0.85, u[30] ?? 0.45);
     this.buffers.writeBuffer(this.uniformBuffer, u);
 
     const encoder = this.gpu.device.createCommandEncoder();
@@ -562,6 +759,10 @@ export class Renderer {
     pass.setBindGroup(0, this.bindGroup);
     this.drawPbrMeshes(pass, counts, offsets);
 
+    pass.setPipeline(this.transparentPipeline);
+    pass.setBindGroup(0, this.bindGroup);
+    this.drawPbrMeshes(pass, tCounts, tOffsets);
+
     const lineCount = counts[GeometryTypeId.Line] ?? 0;
     if (lineCount > 0) {
       const lineMesh = this.meshes.get(GeometryTypeId.Line);
@@ -578,10 +779,7 @@ export class Renderer {
     this.gpu.device.queue.submit([encoder.finish()]);
   }
 
-  private writeLightViewProj(keyLightDir: readonly [number, number, number, number]): void {
-    const lx = keyLightDir[0] ?? 0.5;
-    const ly = keyLightDir[1] ?? 0.85;
-    const lz = keyLightDir[2] ?? 0.45;
+  private writeLightViewProj(lx: number, ly: number, lz: number): void {
     const len = Math.max(1e-4, Math.hypot(lx, ly, lz));
     const dist = 18;
     mat4.lookAt(
@@ -593,7 +791,7 @@ export class Renderer {
       0,
       0,
     );
-    mat4.ortho(this.lightProjScratch, -10, 10, -10, 10, 1, 45);
+    mat4.ortho(this.lightProjScratch, -8, 8, -8, 8, 2, 36);
     mat4.multiply(this.lightViewProjScratch, this.lightProjScratch, this.lightViewScratch);
     this.uniformScratch.set(this.lightViewProjScratch, 168);
   }
@@ -765,7 +963,11 @@ export class Renderer {
     const counts = this.bucketCounts;
     const offsets = this.bucketOffsets;
     const cursors = this.bucketCursors;
+    const tCounts = this.transCounts;
+    const tOffsets = this.transOffsets;
+    const tCursors = this.transCursors;
     counts.fill(0);
+    tCounts.fill(0);
 
     let dynamicLightCount = 0;
     let shadowCasterCount = 0;
@@ -787,7 +989,12 @@ export class Renderer {
       for (let id = 0; id < n; id++) {
         if (alive[id] === 0 || vis[id] === 0) continue;
         const gType = gTypes[id] ?? 0;
-        if (gType < 8) counts[gType] = (counts[gType] ?? 0) + 1;
+        const alpha = cols[id * 4 + 3] ?? 1;
+        const isTransparent = alpha < 0.995 && gType !== GeometryTypeId.Line && gType !== GeometryTypeId.Light;
+        if (gType < 12) {
+          if (isTransparent) tCounts[gType] = (tCounts[gType] ?? 0) + 1;
+          else counts[gType] = (counts[gType] ?? 0) + 1;
+        }
 
         if (gType === GeometryTypeId.Light && dynamicLightCount < 8) {
           const base = 40 + dynamicLightCount * 8;
@@ -803,7 +1010,12 @@ export class Renderer {
           u[base + 7] = lParams[cOff + 1] ?? 1;
           dynamicLightCount++;
         } else if (
-          (gType === GeometryTypeId.Box || gType === GeometryTypeId.Sphere || gType === GeometryTypeId.Cylinder) &&
+          !isTransparent &&
+          (gType === GeometryTypeId.Box ||
+            gType === GeometryTypeId.Sphere ||
+            gType === GeometryTypeId.Cylinder ||
+            gType === GeometryTypeId.Cone ||
+            gType === GeometryTypeId.Torus) &&
           shadowCasterCount < 16
         ) {
           const base = 104 + shadowCasterCount * 4;
@@ -822,10 +1034,15 @@ export class Renderer {
       }
 
       let totalVisible = 0;
-      for (let t = 0; t < 8; t++) {
+      for (let t = 0; t < 12; t++) {
         offsets[t] = totalVisible;
         cursors[t] = totalVisible;
         totalVisible += counts[t] ?? 0;
+      }
+      for (let t = 0; t < 12; t++) {
+        tOffsets[t] = totalVisible;
+        tCursors[t] = totalVisible;
+        totalVisible += tCounts[t] ?? 0;
       }
 
       if (totalVisible > 0) {
@@ -833,10 +1050,18 @@ export class Renderer {
         for (let id = 0; id < n; id++) {
           if (alive[id] === 0 || vis[id] === 0) continue;
           const gType = gTypes[id] ?? 0;
-          if (gType < 8) {
-            const dst = cursors[gType] ?? 0;
-            packed[dst] = id;
-            cursors[gType] = dst + 1;
+          if (gType < 12) {
+            const alpha = cols[id * 4 + 3] ?? 1;
+            const isTransparent = alpha < 0.995 && gType !== GeometryTypeId.Line && gType !== GeometryTypeId.Light;
+            if (isTransparent) {
+              const dst = tCursors[gType] ?? 0;
+              packed[dst] = id;
+              tCursors[gType] = dst + 1;
+            } else {
+              const dst = cursors[gType] ?? 0;
+              packed[dst] = id;
+              cursors[gType] = dst + 1;
+            }
           }
         }
         this.buffers.writeBuffer(this.instanceIdBuffer, packed, 0, 0, totalVisible);
@@ -847,7 +1072,7 @@ export class Renderer {
     u[37] = shadowCasterCount;
     u[38] = 0;
     u[39] = 0;
-    this.writeLightViewProj(presetCfg.keyLightDir);
+    this.writeLightViewProj(u[28] ?? 0.5, u[29] ?? 0.85, u[30] ?? 0.45);
     this.buffers.writeBuffer(this.uniformBuffer, u);
     this.buffers.writeBuffer(this.captureUniformBuffer!, cu);
 

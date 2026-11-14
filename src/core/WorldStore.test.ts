@@ -102,6 +102,15 @@ describe('EntityHandle (Schritt 1)', () => {
     expect(desc.type).toBe('box');
     expect(desc.id).toBe('table');
   });
+
+  it('packs materialId and textureId cleanly in pbrParams.w', () => {
+    const store = new WorldStore(4);
+    const id = store.allocate();
+    store.pbrParams[id * 4 + 3] = 6; // e.g. matte-ceramic materialId
+    store.setTextureId(id, 3);
+    expect(store.textureIds[id]).toBe(3);
+    expect(store.pbrParams[id * 4 + 3]).toBe(6 + 3 * 256);
+  });
 });
 
 describe('SceneSync', () => {

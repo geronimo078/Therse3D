@@ -1,0 +1,659 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>therse3d — Living Earth, Atmosphere, Sun &amp; Shadows</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #03060f;
+        color: #e2e8f0;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      #canvas { width: 100%; height: 100%; display: block; }
+      #hud {
+        position: fixed;
+        top: 14px;
+        left: 14px;
+        width: 330px;
+        padding: 14px;
+        background: rgba(8, 13, 26, 0.85);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(56, 189, 248, 0.28);
+        border-radius: 10px;
+        font-size: 13px;
+      }
+      h1 { margin: 0 0 4px; font-size: 15px; color: #fbbf24; }
+      p { margin: 0 0 10px; font-size: 12px; color: #94a3b8; }
+      .row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+      button {
+        cursor: pointer;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        background: rgba(30, 41, 59, 0.9);
+        color: #f8fafc;
+        padding: 6px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+      }
+      button:hover { border-color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
+      #pickInfo {
+        padding: 8px;
+        border-radius: 6px;
+        background: rgba(2, 6, 23, 0.72);
+        font: 11px/1.4 monospace;
+        color: #a5f3fc;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div id="hud">
+      <h1>Living Earth &amp; Atmosphere</h1>
+      <p>Cone pine forests &amp; peaks, translucent atmosphere, Torus orbit ring, starfield, city lights, flights &amp; live shadows.</p>
+      <div class="row">
+        <button id="btnPause">Pause</button>
+        <button id="btnSunOrbit">Sun Orbit: ON</button>
+        <button id="btnPlant">+ Plant Trees</button>
+        <button id="btnFocusMoon">Focus Moon</button>
+        <button id="btnFit">Focus Earth</button>
+      </div>
+      <div id="pickInfo">Click any continent, tree, cloud, plane, moon, or sun...</div>
+    </div>
+
+    <script type="module">
+      import {
+        Engine,
+        Sphere,
+        Cylinder,
+        Cone,
+        Torus,
+        Box,
+        Line,
+        Group,
+        Light,
+        Model,
+        OrbitControls,
+        quat,
+      } from '../src/index.ts';
+
+      const pickInfo = document.getElementById('pickInfo');
+      const btnPause = document.getElementById('btnPause');
+      const btnSunOrbit = document.getElementById('btnSunOrbit');
+      const btnPlant = document.getElementById('btnPlant');
+      const btnFocusMoon = document.getElementById('btnFocusMoon');
+      const btnFit = document.getElementById('btnFit');
+
+      function alignUpToNormal(handle, nx, ny, nz, yaw = 0) {
+        const dot = Math.max(-1, Math.min(1, ny));
+        let ax = 0, ay = 0, az = 0, aw = 1;
+        if (dot < -0.9999) {
+          ax = 1; aw = 0;
+        } else if (dot <= 0.9999) {
+          const qx = nz;
+          const qy = 0;
+          const qz = -nx;
+          const qw = 1 + dot;
+          const len = Math.hypot(qx, qy, qz, qw);
+          ax = qx / len;
+          ay = qy / len;
+          az = qz / len;
+          aw = qw / len;
+        }
+        if (yaw !== 0) {
+          const hy = Math.sin(yaw * 0.5);
+          const hw = Math.cos(yaw * 0.5);
+          // qAlign * qYaw (yaw around local +Y axis)
+          handle.rotation = [
+            aw * 0 + ax * hw + ay * 0 - az * hy,
+            aw * hy - ax * 0 + ay * hw + az * 0,
+            aw * 0 + ax * hy - ay * 0 + az * hw,
+            aw * hw - ax * 0 - ay * hy - az * 0,
+          ];
+          return;
+        }
+        handle.rotation = [ax, ay, az, aw];
+      }
+
+      function sphericalNormal(latDeg, lonDeg) {
+        const lat = (latDeg * Math.PI) / 180;
+        const lon = (lonDeg * Math.PI) / 180;
+        const cosLat = Math.cos(lat);
+        return [
+          cosLat * Math.cos(lon),
+          Math.sin(lat),
+          cosLat * Math.sin(lon),
+        ];
+      }
+
+      try {
+        const app = await Engine.create('#canvas', { preset: 'dark-ui' });
+
+        // Starfield background
+        for (let i = 0; i < 120; i++) {
+          const u = Math.sin(i * 12.9898) * 43758.5453;
+          const v = Math.sin(i * 78.233) * 19341.123;
+          const theta = (u - Math.floor(u)) * Math.PI * 2;
+          const phi = Math.acos(2 * (v - Math.floor(v)) - 1);
+          const sr = 24 + (i % 7) * 2;
+          app.add(Sphere({
+            id: `star-${i}`,
+            radius: 0.03 + (i % 3) * 0.015,
+            position: [
+              sr * Math.sin(phi) * Math.cos(theta),
+              sr * Math.cos(phi),
+              sr * Math.sin(phi) * Math.sin(theta),
+            ],
+            color: i % 5 === 0 ? '#bae6fd' : '#f8fafc',
+            emissive: 2.2,
+          }));
+        }
+
+        // Dynamic Sun
+        const sunRadius = 10.5;
+        const sunLight = app.add(Light({
+          id: 'sun-light',
+          kind: 'directional',
+          position: [8.0, 4.5, 6.0],
+          color: '#fff3d1',
+          intensity: 2.7,
+        }));
+        const sunMesh = app.add(Sphere({
+          id: 'sun',
+          radius: 0.78,
+          position: [8.0, 4.5, 6.0],
+          color: '#ffd166',
+          emissive: 4.5,
+          roughness: 0.2,
+        }));
+        const sunCorona = app.add(Sphere({
+          id: 'sun-corona',
+          radius: 1.18,
+          position: [8.0, 4.5, 6.0],
+          color: [1.0, 0.84, 0.36, 0.20],
+          emissive: 2.2,
+          roughness: 1.0,
+        }));
+
+        // Earth Group & Ocean Core (R = 2.0 matches planetary terrain .glb assets)
+        const R = 2.0;
+        const earth = app.add(Group({ id: 'earth', position: [0, 0, 0] }));
+        app.add(Sphere({
+          id: 'ocean',
+          parent: 'earth',
+          radius: R,
+          color: '#0e4c8a',
+          metalness: 0.12,
+          roughness: 0.22,
+        }));
+
+        // Translucent Atmosphere Shell (uses Alpha-Blending Pass)
+        app.add(Sphere({
+          id: 'atmosphere',
+          parent: 'earth',
+          radius: R + 0.38,
+          color: [0.22, 0.58, 1.0, 0.16],
+          emissive: 0.3,
+          roughness: 0.9,
+        }));
+
+        // Shared 3D planetary elevation function (matches generate-planet-assets.mjs)
+        function hash3(ix, iy, iz) {
+          let n = Math.imul(ix, 374761393) + Math.imul(iy, 668265263) + Math.imul(iz, 2147483647);
+          n = Math.imul(n ^ (n >>> 13), 1274126177);
+          return ((n ^ (n >>> 16)) >>> 0) / 4294967295;
+        }
+        const smooth = (t) => t * t * (3 - 2 * t);
+        const lerp = (a, b, t) => a + (b - a) * t;
+        function noise3(x, y, z) {
+          const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+          const fx = smooth(x - ix), fy = smooth(y - iy), fz = smooth(z - iz);
+          const x00 = lerp(hash3(ix, iy, iz), hash3(ix + 1, iy, iz), fx);
+          const x10 = lerp(hash3(ix, iy + 1, iz), hash3(ix + 1, iy + 1, iz), fx);
+          const x01 = lerp(hash3(ix, iy, iz + 1), hash3(ix + 1, iy, iz + 1), fx);
+          const x11 = lerp(hash3(ix, iy + 1, iz + 1), hash3(ix + 1, iy + 1, iz + 1), fx);
+          return lerp(lerp(x00, x10, fy), lerp(x01, x11, fy), fz) * 2 - 1;
+        }
+        function fbm3(x, y, z, octaves = 5) {
+          let sum = 0, amp = 0.5, freq = 1.0;
+          for (let i = 0; i < octaves; i++) {
+            sum += amp * noise3(x * freq, y * freq, z * freq);
+            freq *= 2.07;
+            amp *= 0.5;
+          }
+          return sum;
+        }
+        function ridged3(x, y, z, octaves = 4) {
+          let sum = 0, amp = 0.5, freq = 1.0;
+          for (let i = 0; i < octaves; i++) {
+            const n = 1.0 - Math.abs(noise3(x * freq, y * freq, z * freq));
+            sum += amp * n * n;
+            freq *= 2.13;
+            amp *= 0.5;
+          }
+          return sum;
+        }
+        function getPlanetElevation(nx, ny, nz) {
+          const warpX = fbm3(nx * 1.4 + 3.1, ny * 1.4 - 1.7, nz * 1.4 + 2.3, 3) * 0.45;
+          const warpY = fbm3(nx * 1.4 - 2.4, ny * 1.4 + 4.1, nz * 1.4 - 1.2, 3) * 0.45;
+          const warpZ = fbm3(nx * 1.4 + 1.1, ny * 1.4 + 2.8, nz * 1.4 - 3.6, 3) * 0.45;
+          const cont = fbm3((nx + warpX) * 1.65, (ny + warpY) * 1.65, (nz + warpZ) * 1.65, 5);
+          const detail = fbm3(nx * 5.2 + 7.1, ny * 5.2 - 3.4, nz * 5.2 + 1.9, 4) * 0.14;
+          const rawLand = cont + detail + 0.03;
+          if (rawLand <= 0) return rawLand * 0.12;
+          const ridge = ridged3(nx * 3.4 + 5.2, ny * 3.4 - 2.1, nz * 3.4 + 8.7, 4);
+          const mountainMask = Math.max(0, Math.min(1, (rawLand - 0.04) * 3.2));
+          return rawLand * 0.16 + ridge * mountainMask * 0.15;
+        }
+
+        // Preload detailed .glb 3D planet terrain & tree assets into GPU cache once
+        const PLANET_ASSETS = {
+          coast: './assets/earth-coast.glb',
+          land: './assets/earth-land.glb',
+          mountains: './assets/earth-mountains.glb',
+          snow: './assets/earth-snow.glb',
+        };
+        const TREE_ASSETS = {
+          pineTrunk: './assets/pine-trunk.glb',
+          pineCanopy: './assets/pine-canopy.glb',
+          oakTrunk: './assets/oak-trunk.glb',
+          oakCanopy: './assets/oak-canopy.glb',
+        };
+        await Promise.all([
+          app.loadModel(PLANET_ASSETS.coast),
+          app.loadModel(PLANET_ASSETS.land),
+          app.loadModel(PLANET_ASSETS.mountains),
+          app.loadModel(PLANET_ASSETS.snow),
+          app.loadModel(TREE_ASSETS.pineTrunk),
+          app.loadModel(TREE_ASSETS.pineCanopy),
+          app.loadModel(TREE_ASSETS.oakTrunk),
+          app.loadModel(TREE_ASSETS.oakCanopy),
+        ]);
+
+        // Sculpted 3D Planetary Landscape Layers
+        app.add(Model({ id: 'earth-coast', parent: 'earth', url: PLANET_ASSETS.coast, color: '#d4c388', roughness: 0.90 }));
+        app.add(Model({ id: 'earth-land', parent: 'earth', url: PLANET_ASSETS.land, color: '#2f7a42', roughness: 0.85 }));
+        app.add(Model({ id: 'earth-mountains', parent: 'earth', url: PLANET_ASSETS.mountains, color: '#7a6552', roughness: 0.90 }));
+        app.add(Model({ id: 'earth-snow', parent: 'earth', url: PLANET_ASSETS.snow, color: '#f1f5f9', roughness: 0.65 }));
+
+        // Detailed 3D Tree Assets (.glb: pine in temperate/boreal, oak in tropical/subtropical)
+        let treeCounter = 0;
+        function plantTree(lat, lon) {
+          const idx = treeCounter++;
+          const [nx, ny, nz] = sphericalNormal(lat, lon);
+          const elev = Math.max(0.012, getPlanetElevation(nx, ny, nz));
+          const isPine = Math.abs(lat) >= 28;
+          const baseR = R + elev - 0.012;
+          const scale = isPine ? 0.25 + (idx % 3) * 0.04 : 0.27 + (idx % 3) * 0.035;
+          const yaw = ((idx * 137.5) % 360) * (Math.PI / 180);
+
+          const trunk = app.add(Model({
+            id: `tree-trunk-${idx}`,
+            parent: 'earth',
+            url: isPine ? TREE_ASSETS.pineTrunk : TREE_ASSETS.oakTrunk,
+            position: [nx * baseR, ny * baseR, nz * baseR],
+            scale: [scale, scale, scale],
+            material: 'oak-wood',
+          }));
+          alignUpToNormal(trunk, nx, ny, nz, yaw);
+
+          const canopyColors = isPine
+            ? ['#1b4332', '#2d6a4f', '#24553c']
+            : ['#2f7d32', '#388e3c', '#43a047'];
+          const canopy = app.add(Model({
+            id: `tree-canopy-${idx}`,
+            parent: 'earth',
+            url: isPine ? TREE_ASSETS.pineCanopy : TREE_ASSETS.oakCanopy,
+            position: [nx * baseR, ny * baseR, nz * baseR],
+            scale: [scale, scale, scale],
+            color: canopyColors[idx % canopyColors.length],
+            roughness: 0.80,
+          }));
+          alignUpToNormal(canopy, nx, ny, nz, yaw);
+        }
+
+        // Sample land spots across the globe so trees & cities always sit on real 3D continents
+        const landForestSpots = [];
+        const landCitySpots = [];
+        const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+        for (let i = 0; i < 420; i++) {
+          const y = 1 - (i / 419) * 2;
+          const rad = Math.sqrt(Math.max(0, 1 - y * y));
+          const theta = goldenAngle * i;
+          const nx = Math.cos(theta) * rad;
+          const nz = Math.sin(theta) * rad;
+          const elev = getPlanetElevation(nx, y, nz);
+          const lat = (Math.asin(y) * 180) / Math.PI;
+          const lon = (Math.atan2(nz, nx) * 180) / Math.PI;
+          if (Math.abs(y) < 0.80 && elev > 0.015 && elev < 0.070) {
+            landForestSpots.push([lat, lon]);
+          } else if (Math.abs(y) < 0.72 && elev > 0.008 && elev <= 0.015 && landCitySpots.length < 12) {
+            landCitySpots.push([lat, lon]);
+          }
+        }
+        const initialForests = landForestSpots.slice(0, 45);
+        initialForests.forEach(([lat, lon]) => plantTree(lat, lon));
+
+        // Polar Icebergs in high-latitude oceans
+        let bergCount = 0;
+        for (let i = 0; i < 180 && bergCount < 14; i++) {
+          const y = 1 - (i / 179) * 2;
+          if (Math.abs(y) < 0.86 || Math.abs(y) > 0.96) continue;
+          const rad = Math.sqrt(Math.max(0, 1 - y * y));
+          const theta = goldenAngle * i * 1.7;
+          const nx = Math.cos(theta) * rad;
+          const nz = Math.sin(theta) * rad;
+          const elev = getPlanetElevation(nx, y, nz);
+          if (elev < -0.003) {
+            const berg = app.add(Box({
+              id: `iceberg-${bergCount++}`,
+              parent: 'earth',
+              position: [nx * (R + 0.005), y * (R + 0.005), nz * (R + 0.005)],
+              size: [0.09 + (bergCount % 3) * 0.03, 0.035, 0.07 + (bergCount % 2) * 0.03],
+              color: '#e0f2fe',
+              roughness: 0.45,
+            }));
+            alignUpToNormal(berg, nx, y, nz, bergCount * 0.9);
+          }
+        }
+
+        // Aurora Borealis & Aurora Australis (translucent glowing polar rings)
+        app.add(Torus({
+          id: 'aurora-north',
+          parent: 'earth',
+          position: [0, R * 0.94, 0],
+          scale: [1.35, 0.22, 1.35],
+          color: [0.16, 0.96, 0.62, 0.24],
+          emissive: 2.0,
+        }));
+        app.add(Torus({
+          id: 'aurora-south',
+          parent: 'earth',
+          position: [0, -R * 0.94, 0],
+          scale: [1.28, 0.20, 1.28],
+          color: [0.22, 0.88, 0.72, 0.20],
+          emissive: 1.8,
+        }));
+
+        // Night-side City Lights
+        const cities = landCitySpots.length > 0 ? landCitySpots : [[40, -74], [51, 0], [35, 139]];
+        cities.forEach(([lat, lon], idx) => {
+          const [nx, ny, nz] = sphericalNormal(lat, lon);
+          const elev = Math.max(0.01, getPlanetElevation(nx, ny, nz));
+          const d = R + elev + 0.015;
+          app.add(Sphere({
+            id: `city-light-${idx}`,
+            parent: 'earth',
+            position: [nx * d, ny * d, nz * d],
+            radius: 0.028,
+            color: '#fbbf24',
+            emissive: 2.5,
+          }));
+        });
+
+        // Flight Arcs & Animated Planes
+        const routes = [
+          { from: [40, -74], to: [51, 0] },
+          { from: [48, 2], to: [35, 139] },
+          { from: [-23, -46], to: [22, 14] },
+        ];
+        const planes = [];
+        routes.forEach((route, rIdx) => {
+          const n0 = sphericalNormal(route.from[0], route.from[1]);
+          const n1 = sphericalNormal(route.to[0], route.to[1]);
+          const arcSteps = 16;
+          for (let s = 0; s < arcSteps; s++) {
+            const t0 = s / arcSteps;
+            const t1 = (s + 1) / arcSteps;
+            const interp = (t) => {
+              const x = n0[0] * (1 - t) + n1[0] * t;
+              const y = n0[1] * (1 - t) + n1[1] * t;
+              const z = n0[2] * (1 - t) + n1[2] * t;
+              const len = Math.hypot(x, y, z) || 1;
+              const alt = R + 0.06 + Math.sin(t * Math.PI) * 0.26;
+              return [(x / len) * alt, (y / len) * alt, (z / len) * alt];
+            };
+            app.add(Line({
+              id: `flight-arc-${rIdx}-${s}`,
+              parent: 'earth',
+              from: interp(t0),
+              to: interp(t1),
+              color: '#38bdf8',
+            }));
+          }
+          const planeMesh = app.add(Cone({
+            id: `plane-${rIdx}`,
+            parent: 'earth',
+            size: [0.06, 0.12, 0.06],
+            color: '#f8fafc',
+            emissive: 0.6,
+          }));
+          planes.push({ mesh: planeMesh, n0, n1, phase: rIdx * 0.33 });
+        });
+
+        // Multi-Puff Clouds
+        const clouds = app.add(Group({ id: 'clouds', position: [0, 0, 0] }));
+        const cloudSeeds = [
+          [22, 15], [14, 78], [-16, 145], [38, 215], [-26, 290], [52, 330], [5, 250], [-38, 45],
+          [44, 65], [-8, 15], [28, 140], [-45, 195], [60, 110], [-18, 235],
+        ];
+        cloudSeeds.forEach(([lat, lon], i) => {
+          const puffs = [
+            [0, 0, 0.14],
+            [3, 5, 0.11],
+            [-2, -5, 0.10],
+            [2, -3, 0.09],
+          ];
+          puffs.forEach(([dLat, dLon, rad], j) => {
+            const [nx, ny, nz] = sphericalNormal(lat + dLat, lon + dLon);
+            const cDist = R + 0.42 + (i % 2) * 0.04;
+            app.add(Sphere({
+              id: `cloud-${i}-${j}`,
+              parent: 'clouds',
+              position: [nx * cDist, ny * cDist, nz * cDist],
+              radius: rad,
+              color: '#f8fafc',
+              roughness: 0.95,
+            }));
+          });
+        });
+
+        // Torus Orbital Ring + Moon + Satellite
+        const orbitRing = app.add(Torus({
+          id: 'orbital-ring',
+          position: [0, 0, 0],
+          scale: [7.2, 0.18, 7.2],
+          color: [0.22, 0.74, 0.97, 0.35],
+          emissive: 0.4,
+        }));
+        quat.fromEuler(orbitRing.rotation, 0.10, 0, 0.08);
+
+        // Procedural 512x512 Moon Albedo Texture (Maria, Highlands, Impact Craters & Rays)
+        function createMoonTexture() {
+          const size = 512;
+          const canvas = document.createElement('canvas');
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext('2d');
+          const img = ctx.createImageData(size, size);
+          const data = img.data;
+
+          // Equirectangular lunar albedo using our 3D fbm noise + craters
+          const craters = [];
+          for (let c = 0; c < 65; c++) {
+            const u = hash3(c, 11, 3);
+            const v = 0.12 + 0.76 * hash3(c, 23, 7);
+            const r = 0.014 + Math.pow(hash3(c, 37, 13), 2.5) * 0.075;
+            craters.push({
+              x: Math.sin(v * Math.PI) * Math.cos(u * Math.PI * 2),
+              y: Math.cos(v * Math.PI),
+              z: Math.sin(v * Math.PI) * Math.sin(u * Math.PI * 2),
+              r,
+              hasRays: c < 6,
+            });
+          }
+
+          for (let py = 0; py < size; py++) {
+            const phi = (py / (size - 1)) * Math.PI;
+            const sinP = Math.sin(phi);
+            const cosP = Math.cos(phi);
+            for (let px = 0; px < size; px++) {
+              const theta = (px / size) * Math.PI * 2;
+              const nx = sinP * Math.cos(theta);
+              const ny = cosP;
+              const nz = sinP * Math.sin(theta);
+
+              // Lunar maria (darker basaltic plains) vs bright highlands
+              const maria = fbm3(nx * 2.1 + 4.2, ny * 2.1 - 1.5, nz * 2.1 + 3.8, 4);
+              const regolith = fbm3(nx * 14.0, ny * 14.0, nz * 14.0, 3) * 0.10;
+              let val = 0.62 - Math.max(0, maria + 0.05) * 0.48 + regolith;
+
+              for (let c = 0; c < craters.length; c++) {
+                const cr = craters[c];
+                const d = Math.hypot(nx - cr.x, ny - cr.y, nz - cr.z);
+                if (d < cr.r * 1.45) {
+                  const t = d / cr.r;
+                  if (t < 0.78) {
+                    val -= 0.14 * (1 - t / 0.78); // dark crater floor
+                  } else if (t < 1.08) {
+                    val += 0.18 * (1 - Math.abs(t - 0.93) / 0.15); // bright rim
+                  } else if (cr.hasRays) {
+                    const ang = Math.atan2(ny - cr.y, nx - cr.x + nz - cr.z);
+                    const ray = Math.max(0, Math.sin(ang * 11 + c));
+                    val += 0.10 * ray * (1 - (t - 1.08) / 0.37);
+                  }
+                }
+              }
+
+              const g = Math.max(25, Math.min(245, Math.round(val * 255)));
+              const off = (py * size + px) * 4;
+              data[off] = g;
+              data[off + 1] = Math.round(g * 0.985);
+              data[off + 2] = Math.round(g * 0.965);
+              data[off + 3] = 255;
+            }
+          }
+          ctx.putImageData(img, 0, 0);
+          return canvas;
+        }
+
+        const moonTexId = app.registerTexture(createMoonTexture());
+        const moonOrbitR = 3.6;
+        const moon = app.add(Group({ id: 'moon-group', position: [moonOrbitR, 0, 0] }));
+        app.add(Sphere({
+          id: 'moon',
+          parent: 'moon-group',
+          radius: 0.36,
+          color: '#ffffff',
+          texture: moonTexId,
+          roughness: 0.92,
+          metalness: 0.02,
+        }));
+
+        const sat = app.add(Group({ id: 'satellite', position: [2.5, 0.5, 0] }));
+        app.add(Box({ id: 'sat-body', parent: 'satellite', size: [0.12, 0.10, 0.14], material: 'polished-gold' }));
+        app.add(Box({ id: 'sat-wing-l', parent: 'satellite', position: [-0.22, 0, 0], size: [0.28, 0.015, 0.10], color: '#1d4ed8', metalness: 0.85, roughness: 0.2 }));
+        app.add(Box({ id: 'sat-wing-r', parent: 'satellite', position: [0.22, 0, 0], size: [0.28, 0.015, 0.10], color: '#1d4ed8', metalness: 0.85, roughness: 0.2 }));
+
+        const iss = app.add(Group({ id: 'iss', position: [-2.7, 0.9, 0] }));
+        app.add(Box({ id: 'iss-truss', parent: 'iss', size: [0.36, 0.03, 0.03], color: '#cbd5e1', metalness: 0.8, roughness: 0.3 }));
+        app.add(Cylinder({ id: 'iss-hab', parent: 'iss', size: [0.045, 0.18, 0.045], color: '#e2e8f0', metalness: 0.6, roughness: 0.35 }));
+        app.add(Box({ id: 'iss-solar-1', parent: 'iss', position: [-0.15, 0, 0], size: [0.06, 0.01, 0.24], color: '#1e3a8a', metalness: 0.85, roughness: 0.2 }));
+        app.add(Box({ id: 'iss-solar-2', parent: 'iss', position: [0.15, 0, 0], size: [0.06, 0.01, 0.24], color: '#1e3a8a', metalness: 0.85, roughness: 0.2 }));
+        app.add(Sphere({ id: 'iss-beacon', parent: 'iss', position: [0, 0.10, 0], radius: 0.02, color: '#38bdf8', emissive: 3.0 }));
+
+        app.use(OrbitControls({ distance: 7.0, target: [0, 0, 0] }));
+
+        let paused = false;
+        let sunOrbit = true;
+        let simTime = 0;
+
+        btnPause.addEventListener('click', () => {
+          paused = !paused;
+          btnPause.textContent = paused ? 'Resume' : 'Pause';
+        });
+        btnSunOrbit.addEventListener('click', () => {
+          sunOrbit = !sunOrbit;
+          btnSunOrbit.textContent = `Sun Orbit: ${sunOrbit ? 'ON' : 'OFF'}`;
+        });
+        btnPlant.addEventListener('click', () => {
+          for (let k = 0; k < 5; k++) {
+            const [lat, lon] = landForestSpots[(treeCounter + k) % landForestSpots.length];
+            plantTree(lat, lon);
+          }
+          pickInfo.textContent = `Planted 5 more 3D trees! Total trees: ${treeCounter}`;
+        });
+        btnFocusMoon.addEventListener('click', () => app.focusCamera({ target: 'moon', angle: 'front-elevated', distance: 2.2 }));
+        btnFit.addEventListener('click', () => app.focusCamera({ target: 'earth', angle: 'front-elevated', distance: 7.0 }));
+
+        app.onTick((dt) => {
+          if (paused) return;
+          simTime += dt;
+
+          quat.fromEuler(earth.rotation, 0.18, simTime * 0.20, 0);
+          quat.fromEuler(clouds.rotation, 0.18, simTime * 0.32, 0);
+
+          for (const p of planes) {
+            const t = (simTime * 0.16 + p.phase) % 1;
+            const x = p.n0[0] * (1 - t) + p.n1[0] * t;
+            const y = p.n0[1] * (1 - t) + p.n1[1] * t;
+            const z = p.n0[2] * (1 - t) + p.n1[2] * t;
+            const len = Math.hypot(x, y, z) || 1;
+            const nx = x / len, ny = y / len, nz = z / len;
+            const alt = R + 0.08 + Math.sin(t * Math.PI) * 0.26;
+            p.mesh.setPosition(nx * alt, ny * alt, nz * alt);
+            alignUpToNormal(p.mesh, nx, ny, nz);
+          }
+
+          const mAngle = simTime * 0.35;
+          moon.setPosition(
+            Math.cos(mAngle) * moonOrbitR,
+            0.35 * Math.sin(mAngle),
+            Math.sin(mAngle) * moonOrbitR,
+          );
+
+          const sAngle = -simTime * 0.95;
+          sat.setPosition(
+            Math.cos(sAngle) * 2.55,
+            Math.sin(sAngle * 2) * 0.55,
+            Math.sin(sAngle) * 2.55,
+          );
+          quat.fromEuler(sat.rotation, 0, -sAngle, 0.3);
+
+          const issAngle = simTime * 0.72 + 2.1;
+          iss.setPosition(
+            Math.cos(issAngle) * 2.75,
+            Math.sin(issAngle) * 1.15,
+            Math.sin(issAngle) * 2.50,
+          );
+          quat.fromEuler(iss.rotation, 0.35, -issAngle, 0.2);
+
+          if (sunOrbit) {
+            const sunA = simTime * 0.18 + 0.6;
+            const sx = Math.cos(sunA) * sunRadius;
+            const sy = 4.2 + Math.sin(sunA * 0.5) * 1.5;
+            const sz = Math.sin(sunA) * sunRadius;
+            sunLight.setPosition(sx, sy, sz);
+            sunMesh.setPosition(sx, sy, sz);
+            sunCorona.setPosition(sx, sy, sz);
+          }
+        });
+
+        app.gpu.canvas.addEventListener('click', (e) => {
+          const hit = app.pick(e.clientX, e.clientY);
+          if (hit) {
+            pickInfo.textContent = `Picked: "${hit.id}"\nDistance: ${hit.distance.toFixed(2)}m\nPoint: [${hit.point.map((v) => v.toFixed(2)).join(', ')}]`;
+          } else {
+            pickInfo.textContent = 'Space (no entity hit)';
+          }
+        });
+      } catch (err) {
+        pickInfo.textContent = err instanceof Error ? err.message : String(err);
+      }
+    </script>
+  </body>
+</html>
