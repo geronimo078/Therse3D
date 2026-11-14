@@ -3,6 +3,7 @@ import { SpatialLayout, type SceneLayoutGroup, type SpatialPlacement } from './S
 import { DirtyFlag, GeometryTypeId, LightKindId, type WorldStore } from './WorldStore';
 import { parseColor, resolveMaterial } from '../entities/Materials';
 import { applyLineEndpoints, type GeometryMeshData, type LightKind, type PrimitiveType } from '../entities/Primitives';
+import type { VolumetricConfig } from '../gpu/Renderer';
 
 export type CameraAnglePreset = 'front' | 'front-elevated' | 'top' | 'isometric';
 
@@ -42,6 +43,7 @@ export interface SceneSyncState {
   preset?: string;
   transition?: number;
   camera?: SceneSyncCamera;
+  volumetric?: VolumetricConfig;
   entities: SceneSyncNode[];
   layouts?: SceneLayoutGroup[];
 }
@@ -50,6 +52,7 @@ export interface ScenePatchState {
   preset?: string;
   transition?: number;
   camera?: SceneSyncCamera;
+  volumetric?: VolumetricConfig;
   upsert?: SceneSyncNode[];
   remove?: string[];
 }
@@ -69,6 +72,7 @@ export interface SceneSyncHooks {
   onEntityRemoved?: (name: string, entityId: number) => void;
   onModelRef?: (entityId: number, url: string | undefined, mesh: GeometryMeshData | undefined, warnings: string[]) => void;
   onTextureRef?: (entityId: number, texture: string | number, warnings: string[]) => void;
+  onVolumetric?: (config: VolumetricConfig) => void;
 }
 
 const VALID_TYPE_MAP: Record<string, GeometryTypeId> = {
@@ -219,6 +223,7 @@ export class SceneSync {
           : {}),
       ...(patchState.transition !== undefined ? { transition: patchState.transition } : {}),
       ...(patchState.camera !== undefined ? { camera: patchState.camera } : {}),
+      ...(patchState.volumetric !== undefined ? { volumetric: patchState.volumetric } : {}),
     };
 
     const result = this.apply(nextState, hooks);
@@ -257,6 +262,9 @@ export class SceneSync {
 
     if (state.preset !== undefined && hooks?.onPreset) {
       hooks.onPreset(state.preset, warnings);
+    }
+    if (state.volumetric !== undefined && hooks?.onVolumetric) {
+      hooks.onVolumetric(state.volumetric);
     }
 
     const transition =

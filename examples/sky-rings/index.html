@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>therse3d — Sky Rings Flight Game</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #0f172a;
+        color: #f8fafc;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      #canvas { width: 100%; height: 100%; display: block; }
+      #hud {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        width: 290px;
+        padding: 14px 16px;
+        background: rgba(10, 16, 30, 0.82);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(56, 189, 248, 0.35);
+        border-radius: 12px;
+        font-size: 13px;
+        pointer-events: auto;
+      }
+      #hud h1 {
+        margin: 0 0 6px;
+        font-size: 16px;
+        color: #38bdf8;
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin: 10px 0;
+      }
+      .stat-box {
+        background: rgba(15, 23, 42, 0.75);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 8px;
+        padding: 8px 10px;
+      }
+      .stat-label { font-size: 11px; color: #94a3b8; text-transform: uppercase; }
+      .stat-val { font-size: 20px; font-weight: 700; color: #fbbf24; }
+      .controls {
+        font-size: 12px;
+        line-height: 1.5;
+        color: #cbd5e1;
+        margin-top: 8px;
+        border-top: 1px solid rgba(148, 163, 184, 0.2);
+        padding-top: 8px;
+      }
+      kbd {
+        background: #1e293b;
+        border: 1px solid #475569;
+        border-radius: 4px;
+        padding: 1px 5px;
+        font-size: 11px;
+        color: #e2e8f0;
+      }
+      .btn-row {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      button {
+        flex: 1;
+        border: 1px solid rgba(56, 189, 248, 0.45);
+        background: #0f172a;
+        color: #e2e8f0;
+        border-radius: 6px;
+        padding: 6px 8px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      button:hover { background: #1e293b; }
+      #toast {
+        position: fixed;
+        top: 22px;
+        left: 50%;
+        transform: translateX(-50%);
+        padding: 8px 18px;
+        border-radius: 999px;
+        background: rgba(34, 197, 94, 0.9);
+        color: #052e16;
+        font-weight: 700;
+        font-size: 15px;
+        opacity: 0;
+        transition: opacity 0.25s ease;
+        pointer-events: none;
+      }
+      #toast.show { opacity: 1; }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div id="hud">
+      <h1>Sky Rings</h1>
+      <div style="color:#94a3b8;">Fly through the golden ring to score points!</div>
+      <div class="stats">
+        <div class="stat-box">
+          <div class="stat-label">Score</div>
+          <div id="scoreVal" class="stat-val">0</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Next Ring</div>
+          <div id="ringVal" class="stat-val" style="color:#38bdf8;">1 / 12</div>
+        </div>
+      </div>
+      <div class="controls">
+        <div><strong>Mouse</strong> Steer &nbsp; <strong>Left Click</strong> Turbo Boost</div>
+        <div><kbd>W</kbd>/<kbd>↑</kbd> Climb &nbsp; <kbd>S</kbd>/<kbd>↓</kbd> Dive</div>
+        <div><kbd>A</kbd>/<kbd>←</kbd> Left &nbsp;&nbsp; <kbd>D</kbd>/<kbd>→</kbd> Right</div>
+        <div><kbd>Space</kbd> / <kbd>Shift</kbd> Boost &nbsp; <kbd>R</kbd> Reset</div>
+      </div>
+      <div class="btn-row">
+        <button id="btnReset">Reset Course</button>
+        <button id="btnPause">Pause</button>
+      </div>
+      <div id="statusMsg" style="margin-top:8px;font-size:11px;color:#64748b;"></div>
+    </div>
+    <div id="toast">+1 Point!</div>
+
+    <script type="module" src="./game.js"></script>
+  </body>
+</html>
+

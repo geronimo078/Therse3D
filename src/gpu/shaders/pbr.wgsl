@@ -66,6 +66,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @vertex
 fn vs_shadow(in: VertexInput) -> @builtin(position) vec4<f32> {
   let entityId = instanceIds[in.instanceIdx];
+  // Emissive light sources (e.g., sun, stars, beacons) must not cast shadows
+  if (pbrParams[entityId].z > 0.5) {
+    return vec4<f32>(0.0, 0.0, 2.0, 1.0);
+  }
   let model = modelMatrices[entityId];
   let worldPos = model * vec4<f32>(in.position, 1.0);
   return scene.lightViewProj * worldPos;
@@ -255,19 +259,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let V = normalize(scene.cameraPos.xyz - in.worldPos);
   let F0 = mix(vec3<f32>(0.04), albedo, metalness);
 
-  // 3-Punkt-Studio-Beleuchtung (Key, Fill, Rim)
+  // 3-Punkt-Studio-Beleuchtung (nur aktiv, wenn keine eigenen Lichter in der Szene definiert sind)
   let keyDir = normalize(scene.keyLightDir.xyz);
   let fillDir = normalize(vec3<f32>(-0.7, 0.4, 0.5));
   let rimDir = normalize(vec3<f32>(0.2, 0.6, -0.8));
 
+  let lightCount = i32(scene.counts.x);
+  let hasCustomLights = lightCount > 0;
+
   var Lo = vec3<f32>(0.0);
   let dirShadow = computeDirectionalShadow(in.worldPos, N, keyDir);
-  Lo += evalLight(N, V, keyDir, scene.keyLightColor.rgb * 2.4, albedo, metalness, roughness, F0) * mix(0.25, 1.0, dirShadow);
-  Lo += evalLight(N, V, fillDir, vec3<f32>(0.45, 0.52, 0.65), albedo, metalness, roughness, F0);
-  Lo += evalLight(N, V, rimDir, vec3<f32>(0.75, 0.80, 0.90), albedo, metalness, roughness, F0);
+  if (!hasCustomLights) {
+    Lo += evalLight(N, V, keyDir, scene.keyLightColor.rgb * 2.4, albedo, metalness, roughness, F0) * mix(0.25, 1.0, dirShadow);
+    Lo += evalLight(N, V, fillDir, vec3<f32>(0.45, 0.52, 0.65), albedo, metalness, roughness, F0);
+    Lo += evalLight(N, V, rimDir, vec3<f32>(0.75, 0.80, 0.90), albedo, metalness, roughness, F0);
+  }
 
   // Dynamic Light Entities (up to 8)
-  let lightCount = i32(scene.counts.x);
   for (var i = 0; i < 8; i++) {
     if (i >= lightCount) {
       break;
@@ -276,7 +284,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let isDir = dl.posOrDir.w > 0.5;
     if (isDir) {
       let L = normalize(dl.posOrDir.xyz);
-      Lo += evalLight(N, V, L, dl.colorIntensity.rgb * dl.colorIntensity.w, albedo, metalness, roughness, F0);
+      Lo += evalLight(N, V, L, dl.colorIntensity.rgb * dl.colorIntensity.w, albedo, metalness, roughness, F0) * mix(0.05, 1.0, dirShadow);
     } else {
       let toLight = dl.posOrDir.xyz - in.worldPos;
       let dist = length(toLight);
@@ -288,10 +296,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
   let contactShadow = computeContactShadow(in.worldPos, N);
 
-  // Hemisphere Ambient
+  // Hemisphere Ambient (subtil bei eigenen Lichtquellen für echten Tag/Nacht-Kontrast)
   let hemiFactor = N.y * 0.5 + 0.5;
   let ambientLight = mix(scene.groundColor.rgb, scene.skyColor.rgb, hemiFactor);
-  let ambient = ambientLight * albedo * (1.0 - metalness * 0.6) * 0.35 * contactShadow;
+  let ambientFactor = select(0.35, 0.04, hasCustomLights);
+  let ambient = ambientLight * albedo * (1.0 - metalness * 0.6) * ambientFactor * contactShadow;
 
   let hdr = ambient + Lo * mix(0.45, 1.0, contactShadow) + albedo * emissive;
   let mapped = acesToneMap(hdr);

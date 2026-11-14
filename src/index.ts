@@ -20,7 +20,7 @@ export {
 } from './core/SceneSync';
 
 export { GPUDeviceContext } from './gpu/Device';
-export { Renderer } from './gpu/Renderer';
+export { Renderer, type VolumetricConfig } from './gpu/Renderer';
 export { BufferManager } from './gpu/BufferManager';
 
 export { EntityHandle, type Vec3Like, type Vec4Like } from './entities/EntityHandle';

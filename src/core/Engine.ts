@@ -9,7 +9,7 @@ import {
   type SceneSyncState,
 } from './SceneSync';
 import { GPUDeviceContext } from '../gpu/Device';
-import { Renderer } from '../gpu/Renderer';
+import { Renderer, type VolumetricConfig } from '../gpu/Renderer';
 import {
   Inspector,
   pickFromScreen,
@@ -328,7 +328,15 @@ export class Engine {
       onTextureRef: (entityId, texture, warnings) => {
         this.applyTextureRef(entityId, texture, warnings);
       },
+      onVolumetric: (config) => {
+        this.setVolumetric(config);
+      },
     };
+  }
+
+  setVolumetric(config: VolumetricConfig): this {
+    this.renderer.setVolumetric(config);
+    return this;
   }
 
   registerTexture(
@@ -545,7 +553,7 @@ export class Engine {
       }
       this.sceneSync.updateTweens(dt);
       this.store.updateMatrices();
-      this.renderer.renderFrame(this.camera);
+      this.renderer.renderFrame(this.camera, this.elapsed);
       this.rafId = requestAnimationFrame(loop);
     };
     this.rafId = requestAnimationFrame(loop);

@@ -16,6 +16,25 @@ import type { EnginePreset } from '../core/Engine';
 import type { Camera } from '../controls/OrbitControls';
 import pbrShaderCode from './shaders/pbr.wgsl?raw';
 import idDepthShaderCode from './shaders/id_depth.wgsl?raw';
+import volumetricShaderCode from './shaders/volumetric.wgsl?raw';
+import { parseColor } from '../entities/Materials';
+
+export interface VolumetricConfig {
+  enabled?: boolean;
+  fogDensity?: number;
+  fogColor?: string | [number, number, number];
+  fogHeight?: number;
+  cloudDensity?: number;
+  cloudCoverage?: number;
+  cloudMode?: 'planar' | 'spherical';
+  cloudScale?: number;
+  cloudSpeed?: number;
+  cloudAltitude?: [number, number];
+  planetRadius?: number;
+  planetCenter?: [number, number, number];
+  scatter?: number;
+  godRays?: number;
+}
 
 interface GeometryGpuMesh {
   vertexBuffer: GPUBuffer;
@@ -91,8 +110,8 @@ export interface CapturePassResult {
 
 const MSAA_SAMPLE_COUNT = 4;
 const SHADOW_MAP_SIZE = 2048;
-const TEXTURE_SIZE = 512;
-const MAX_TEXTURES = 32;
+const TEXTURE_SIZE = 1024;
+const MAX_TEXTURES = 16;
 
 /**
  * WebGPU Instanced PBR-Renderer mit MSAA (4x), Depth-Buffer & Zero-Allocation Render-Loop.
@@ -155,10 +174,37 @@ export class Renderer {
   // Render target textures (recreated on canvas resize)
   private msaaColorTexture: GPUTexture | null = null;
   private msaaColorView: GPUTextureView | null = null;
+  private sceneColorTexture: GPUTexture | null = null;
+  private sceneColorView: GPUTextureView | null = null;
   private depthTexture: GPUTexture | null = null;
   private depthView: GPUTextureView | null = null;
   private rtWidth = 0;
   private rtHeight = 0;
+
+  // Volumetric Fog & Raymarched Clouds Post-Pass (lazily initialized on enable)
+  private volumetricEnabled = false;
+  private volumetricPipeline: GPURenderPipeline | null = null;
+  private volumetricBindGroupLayout: GPUBindGroupLayout | null = null;
+  private volumetricBindGroup: GPUBindGroup | null = null;
+  private volumetricUniformBuffer: GPUBuffer | null = null;
+  private readonly volumetricScratch = new Float32Array(44); // 176 bytes
+  private readonly invViewProjScratch = new Float32Array(16);
+  private volumetricConfig: Required<Omit<VolumetricConfig, 'fogColor'>> & { fogColorRgb: [number, number, number] } = {
+    enabled: false,
+    fogDensity: 0.014,
+    fogColorRgb: [0.54, 0.71, 0.85],
+    fogHeight: 8.0,
+    cloudDensity: 0.85,
+    cloudCoverage: 0.48,
+    cloudMode: 'planar',
+    cloudScale: 1.1,
+    cloudSpeed: 0.14,
+    cloudAltitude: [4.0, 7.0],
+    planetRadius: 2.0,
+    planetCenter: [0, 0, 0],
+    scatter: 0.62,
+    godRays: 0.85,
+  };
 
   constructor(gpu: GPUDeviceContext, store: WorldStore, preset: EnginePreset = 'studio') {
     this.gpu = gpu;
@@ -220,7 +266,7 @@ export class Renderer {
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-        { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
         { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
         { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
@@ -234,6 +280,7 @@ export class Renderer {
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
@@ -542,7 +589,103 @@ export class Renderer {
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer } },
         { binding: 1, resource: { buffer: this.modelBuffer } },
+        { binding: 3, resource: { buffer: this.pbrBuffer } },
         { binding: 4, resource: { buffer: this.instanceIdBuffer } },
+      ],
+    });
+  }
+
+  setVolumetric(config: VolumetricConfig): void {
+    if (config.enabled !== undefined) this.volumetricConfig.enabled = Boolean(config.enabled);
+    if (config.fogDensity !== undefined && Number.isFinite(config.fogDensity)) {
+      this.volumetricConfig.fogDensity = Math.max(0, config.fogDensity);
+    }
+    if (config.fogHeight !== undefined && Number.isFinite(config.fogHeight)) {
+      this.volumetricConfig.fogHeight = Math.max(0.5, config.fogHeight);
+    }
+    if (config.fogColor !== undefined) {
+      const c = parseColor(config.fogColor);
+      this.volumetricConfig.fogColorRgb = [c[0], c[1], c[2]];
+    }
+    if (config.cloudDensity !== undefined && Number.isFinite(config.cloudDensity)) {
+      this.volumetricConfig.cloudDensity = Math.max(0, config.cloudDensity);
+    }
+    if (config.cloudCoverage !== undefined && Number.isFinite(config.cloudCoverage)) {
+      this.volumetricConfig.cloudCoverage = Math.min(1, Math.max(0, config.cloudCoverage));
+    }
+    if (config.cloudMode === 'planar' || config.cloudMode === 'spherical') {
+      this.volumetricConfig.cloudMode = config.cloudMode;
+    }
+    if (config.cloudScale !== undefined && Number.isFinite(config.cloudScale)) {
+      this.volumetricConfig.cloudScale = Math.max(0.05, config.cloudScale);
+    }
+    if (config.cloudSpeed !== undefined && Number.isFinite(config.cloudSpeed)) {
+      this.volumetricConfig.cloudSpeed = config.cloudSpeed;
+    }
+    if (Array.isArray(config.cloudAltitude) && config.cloudAltitude.length === 2) {
+      const a0 = Number.isFinite(config.cloudAltitude[0]) ? config.cloudAltitude[0] : 4.0;
+      const a1 = Number.isFinite(config.cloudAltitude[1]) ? config.cloudAltitude[1] : a0 + 1.0;
+      this.volumetricConfig.cloudAltitude = [a0, Math.max(a0 + 0.05, a1)];
+    }
+    if (config.planetRadius !== undefined && Number.isFinite(config.planetRadius)) {
+      this.volumetricConfig.planetRadius = Math.max(0.1, config.planetRadius);
+    }
+    if (Array.isArray(config.planetCenter) && config.planetCenter.length === 3) {
+      this.volumetricConfig.planetCenter = [
+        Number.isFinite(config.planetCenter[0]) ? config.planetCenter[0] : 0,
+        Number.isFinite(config.planetCenter[1]) ? config.planetCenter[1] : 0,
+        Number.isFinite(config.planetCenter[2]) ? config.planetCenter[2] : 0,
+      ];
+    }
+    if (config.scatter !== undefined && Number.isFinite(config.scatter)) {
+      this.volumetricConfig.scatter = Math.min(0.92, Math.max(0.05, config.scatter));
+    }
+    if (config.godRays !== undefined && Number.isFinite(config.godRays)) {
+      this.volumetricConfig.godRays = Math.min(3.0, Math.max(0, config.godRays));
+    }
+    this.volumetricEnabled = this.volumetricConfig.enabled;
+  }
+
+  private ensureVolumetricPipeline(): void {
+    if (this.volumetricPipeline) return;
+    const device = this.gpu.device;
+    this.volumetricUniformBuffer = this.buffers.createUniformBuffer(
+      this.volumetricScratch.byteLength,
+      'volumetric-uniforms',
+    );
+    this.volumetricBindGroupLayout = device.createBindGroupLayout({
+      label: 'volumetric-bind-group-layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth', multisampled: true } },
+      ],
+    });
+    const mod = device.createShaderModule({ label: 'volumetric-shader', code: volumetricShaderCode });
+    this.volumetricPipeline = device.createRenderPipeline({
+      label: 'volumetric-pipeline',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.volumetricBindGroupLayout] }),
+      vertex: { module: mod, entryPoint: 'vs_volumetric' },
+      fragment: {
+        module: mod,
+        entryPoint: 'fs_volumetric',
+        targets: [{ format: this.gpu.format }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+  }
+
+  private rebuildVolumetricBindGroup(): void {
+    if (!this.volumetricBindGroupLayout || !this.volumetricUniformBuffer || !this.sceneColorView || !this.depthView) {
+      return;
+    }
+    this.volumetricBindGroup = this.gpu.device.createBindGroup({
+      label: 'volumetric-bind-group',
+      layout: this.volumetricBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.volumetricUniformBuffer } },
+        { binding: 1, resource: this.sceneColorView },
+        { binding: 2, resource: this.depthView },
       ],
     });
   }
@@ -553,6 +696,7 @@ export class Renderer {
     }
 
     if (this.msaaColorTexture) this.buffers.destroyTexture(this.msaaColorTexture);
+    if (this.sceneColorTexture) this.buffers.destroyTexture(this.sceneColorTexture);
     if (this.depthTexture) this.buffers.destroyTexture(this.depthTexture);
 
     this.rtWidth = width;
@@ -567,17 +711,26 @@ export class Renderer {
     });
     this.msaaColorView = this.msaaColorTexture.createView();
 
+    this.sceneColorTexture = this.buffers.createTexture({
+      label: 'scene-color-resolve',
+      size: [width, height],
+      format: this.gpu.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.sceneColorView = this.sceneColorTexture.createView();
+
     this.depthTexture = this.buffers.createTexture({
       label: 'depth-24plus',
       size: [width, height],
       sampleCount: MSAA_SAMPLE_COUNT,
       format: 'depth24plus',
-      usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
     this.depthView = this.depthTexture.createView();
+    this.rebuildVolumetricBindGroup();
   }
 
-  renderFrame(camera?: Camera): void {
+  renderFrame(camera?: Camera, elapsed = 0): void {
     if (this.gpu.isLost) return;
 
     const canvas = this.gpu.canvas;
@@ -735,13 +888,20 @@ export class Renderer {
 
     const encoder = this.gpu.device.createCommandEncoder();
     this.recordShadowPass(encoder, counts, offsets);
-    const resolveView = this.gpu.context.getCurrentTexture().createView();
+    const swapchainView = this.gpu.context.getCurrentTexture().createView();
+    const useVolumetric = this.volumetricEnabled;
+    if (useVolumetric) {
+      this.ensureVolumetricPipeline();
+      if (!this.volumetricBindGroup) {
+        this.rebuildVolumetricBindGroup();
+      }
+    }
 
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
           view: this.msaaColorView!,
-          resolveTarget: resolveView,
+          resolveTarget: useVolumetric ? this.sceneColorView! : swapchainView,
           clearValue: presetCfg.clearColor,
           loadOp: 'clear',
           storeOp: 'discard',
@@ -751,7 +911,7 @@ export class Renderer {
         view: this.depthView!,
         depthClearValue: 1.0,
         depthLoadOp: 'clear',
-        depthStoreOp: 'discard',
+        depthStoreOp: useVolumetric ? 'store' : 'discard',
       },
     });
 
@@ -776,6 +936,85 @@ export class Renderer {
     }
 
     pass.end();
+
+    if (useVolumetric && this.volumetricPipeline && this.volumetricBindGroup && this.volumetricUniformBuffer) {
+      const vp = camera ? camera.viewProjMatrix : u.subarray(0, 16);
+      mat4.invert(this.invViewProjScratch, vp);
+      const vs = this.volumetricScratch;
+      vs.set(this.invViewProjScratch, 0);
+      vs[16] = u[16] ?? 0;
+      vs[17] = u[17] ?? 0;
+      vs[18] = u[18] ?? 0;
+      vs[19] = elapsed;
+
+      const vc = this.volumetricConfig;
+      vs[20] = u[28] ?? 0.5;
+      vs[21] = u[29] ?? 0.85;
+      vs[22] = u[30] ?? 0.45;
+      vs[23] = vc.fogDensity;
+
+      vs[24] = vc.fogColorRgb[0];
+      vs[25] = vc.fogColorRgb[1];
+      vs[26] = vc.fogColorRgb[2];
+      vs[27] = vc.fogHeight;
+
+      vs[28] = vc.cloudDensity;
+      vs[29] = vc.cloudCoverage;
+      vs[30] = vc.cloudMode === 'spherical' ? 1 : 0;
+      vs[31] = vc.cloudScale;
+
+      vs[32] = vc.planetCenter[0];
+      vs[33] = vc.planetCenter[1];
+      vs[34] = vc.planetCenter[2];
+      vs[35] = vc.planetRadius;
+
+      vs[36] = vc.cloudAltitude[0];
+      vs[37] = vc.cloudAltitude[1];
+      vs[38] = vc.cloudSpeed;
+      vs[39] = vc.scatter;
+
+      // Project sun position to screen UV & NDC depth for radial god rays
+      const lx = u[28] ?? 0.5;
+      const ly = u[29] ?? 0.85;
+      const lz = u[30] ?? 0.45;
+      const sunLen = Math.hypot(lx, ly, lz) || 1;
+      const sx = sunLen > 2.5 ? lx : (u[16] ?? 0) + (lx / sunLen) * 50;
+      const sy = sunLen > 2.5 ? ly : (u[17] ?? 0) + (ly / sunLen) * 50;
+      const sz = sunLen > 2.5 ? lz : (u[18] ?? 0) + (lz / sunLen) * 50;
+      const clipX = (vp[0] ?? 0) * sx + (vp[4] ?? 0) * sy + (vp[8] ?? 0) * sz + (vp[12] ?? 0);
+      const clipY = (vp[1] ?? 0) * sx + (vp[5] ?? 0) * sy + (vp[9] ?? 0) * sz + (vp[13] ?? 0);
+      const clipZ = (vp[2] ?? 0) * sx + (vp[6] ?? 0) * sy + (vp[10] ?? 0) * sz + (vp[14] ?? 0);
+      const clipW = (vp[3] ?? 0) * sx + (vp[7] ?? 0) * sy + (vp[11] ?? 0) * sz + (vp[15] ?? 0);
+      if (clipW > 0.001) {
+        vs[40] = (clipX / clipW) * 0.5 + 0.5;
+        vs[41] = 0.5 - (clipY / clipW) * 0.5;
+        vs[42] = Math.max(0.0001, Math.min(1.0, clipZ / clipW));
+        vs[43] = vc.godRays;
+      } else {
+        vs[40] = 0.5;
+        vs[41] = 0.5;
+        vs[42] = -1.0;
+        vs[43] = 0.0;
+      }
+
+      this.buffers.writeBuffer(this.volumetricUniformBuffer, vs);
+
+      const vPass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: swapchainView,
+            clearValue: presetCfg.clearColor,
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+        ],
+      });
+      vPass.setPipeline(this.volumetricPipeline);
+      vPass.setBindGroup(0, this.volumetricBindGroup);
+      vPass.draw(3);
+      vPass.end();
+    }
+
     this.gpu.device.queue.submit([encoder.finish()]);
   }
 

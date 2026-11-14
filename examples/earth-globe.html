@@ -166,40 +166,14 @@
           id: 'sun',
           radius: 0.78,
           position: [8.0, 4.5, 6.0],
-          color: '#ffd166',
-          emissive: 4.5,
-          roughness: 0.2,
-        }));
-        const sunCorona = app.add(Sphere({
-          id: 'sun-corona',
-          radius: 1.18,
-          position: [8.0, 4.5, 6.0],
-          color: [1.0, 0.84, 0.36, 0.20],
-          emissive: 2.2,
-          roughness: 1.0,
+          color: '#ffffff',
+          emissive: 3.4,
+          roughness: 0.3,
         }));
 
-        // Earth Group & Ocean Core (R = 2.0 matches planetary terrain .glb assets)
+        // Earth Group (R = 2.0 matches planetary terrain .glb assets)
         const R = 2.0;
         const earth = app.add(Group({ id: 'earth', position: [0, 0, 0] }));
-        app.add(Sphere({
-          id: 'ocean',
-          parent: 'earth',
-          radius: R,
-          color: '#0e4c8a',
-          metalness: 0.12,
-          roughness: 0.22,
-        }));
-
-        // Translucent Atmosphere Shell (uses Alpha-Blending Pass)
-        app.add(Sphere({
-          id: 'atmosphere',
-          parent: 'earth',
-          radius: R + 0.38,
-          color: [0.22, 0.58, 1.0, 0.16],
-          emissive: 0.3,
-          roughness: 0.9,
-        }));
 
         // Shared 3D planetary elevation function (matches generate-planet-assets.mjs)
         function hash3(ix, iy, iz) {
@@ -274,10 +248,216 @@
           app.loadModel(TREE_ASSETS.oakCanopy),
         ]);
 
-        // Sculpted 3D Planetary Landscape Layers
-        app.add(Model({ id: 'earth-coast', parent: 'earth', url: PLANET_ASSETS.coast, color: '#d4c388', roughness: 0.90 }));
-        app.add(Model({ id: 'earth-land', parent: 'earth', url: PLANET_ASSETS.land, color: '#2f7a42', roughness: 0.85 }));
-        app.add(Model({ id: 'earth-mountains', parent: 'earth', url: PLANET_ASSETS.mountains, color: '#7a6552', roughness: 0.90 }));
+        // Procedural 1024x1024 Planetary Surface Textures
+        function createOceanTexture() {
+          const size = 1024;
+          const canvas = document.createElement('canvas');
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext('2d');
+          const img = ctx.createImageData(size, size);
+          const data = img.data;
+
+          for (let py = 0; py < size; py++) {
+            // Matches createSphereGeometry UV: uv.y = 1 - vCoord
+            const vCoord = 1 - py / (size - 1);
+            const phi = vCoord * Math.PI;
+            const sinP = Math.sin(phi);
+            const cosP = Math.cos(phi);
+            for (let px = 0; px < size; px++) {
+              const theta = (px / size) * Math.PI * 2;
+              const nx = Math.cos(theta) * sinP;
+              const ny = cosP;
+              const nz = Math.sin(theta) * sinP;
+
+              const elev = getPlanetElevation(nx, ny, nz);
+              const swell = fbm3(nx * 14.0, ny * 14.0, nz * 14.0, 3);
+              const current = fbm3(nx * 4.5 + 2.1, ny * 4.5 - 1.3, nz * 4.5 + 3.7, 3);
+              // Shallow coastal turquoise shelf near elev = 0, deep sapphire in open ocean
+              const shallow = Math.max(0, Math.min(1, (elev + 0.016) / 0.016));
+              const deepR = 8 + current * 8 + swell * 5;
+              const deepG = 42 + current * 14 + swell * 8;
+              const deepB = 96 + current * 18 + swell * 10;
+
+              const reefR = 28 + swell * 10;
+              const reefG = 162 + swell * 16;
+              const reefB = 188 + swell * 14;
+
+              const off = (py * size + px) * 4;
+              data[off] = Math.max(0, Math.min(255, Math.round(lerp(deepR, reefR, shallow * shallow))));
+              data[off + 1] = Math.max(0, Math.min(255, Math.round(lerp(deepG, reefG, shallow * shallow))));
+              data[off + 2] = Math.max(0, Math.min(255, Math.round(lerp(deepB, reefB, shallow * shallow))));
+              data[off + 3] = 255;
+            }
+          }
+          ctx.putImageData(img, 0, 0);
+          return canvas;
+        }
+
+        function createPlanetBiomeTextures() {
+          const size = 1024;
+          const makeCanvas = () => {
+            const c = document.createElement('canvas');
+            c.width = size;
+            c.height = size;
+            return c;
+          };
+          const landC = makeCanvas();
+          const mtnC = makeCanvas();
+          const coastC = makeCanvas();
+          const landCtx = landC.getContext('2d');
+          const mtnCtx = mtnC.getContext('2d');
+          const coastCtx = coastC.getContext('2d');
+          const landImg = landCtx.createImageData(size, size);
+          const mtnImg = mtnCtx.createImageData(size, size);
+          const coastImg = coastCtx.createImageData(size, size);
+
+          for (let py = 0; py < size; py++) {
+            // Matches generate-planet-assets.mjs UV: v = asin(ny)/PI + 0.5
+            const lat = (py / (size - 1) - 0.5) * Math.PI;
+            const ny = Math.sin(lat);
+            const cosLat = Math.cos(lat);
+            const absLat = Math.abs(ny);
+            for (let px = 0; px < size; px++) {
+              const theta = (px / size - 0.5) * Math.PI * 2;
+              const nx = cosLat * Math.cos(theta);
+              const nz = cosLat * Math.sin(theta);
+
+              const moisture = fbm3(nx * 3.8 + 6.1, ny * 3.8 - 2.2, nz * 3.8 + 1.4, 4);
+              const micro = fbm3(nx * 18.0, ny * 18.0, nz * 18.0, 3);
+              const strata = ridged3(nx * 9.0 + 1.2, ny * 14.0, nz * 9.0 - 2.3, 3);
+
+              // Biome blend: tropical rainforest -> subtropical desert/savanna -> temperate -> boreal
+              const desertMask = Math.max(0, 1 - Math.abs(absLat - 0.36) * 4.5) * Math.max(0, 0.35 - moisture) * 2.2;
+              const arid = Math.max(0, Math.min(1, desertMask));
+              const cold = Math.max(0, Math.min(1, (absLat - 0.65) * 3.2));
+
+              let lr = 42 + moisture * 18 + micro * 16;
+              let lg = 118 + moisture * 22 + micro * 20;
+              let lb = 54 + moisture * 10 + micro * 10;
+              // Blend arid savanna/desert
+              lr = lerp(lr, 184 + micro * 18, arid);
+              lg = lerp(lg, 154 + micro * 16, arid);
+              lb = lerp(lb, 98 + micro * 12, arid);
+              // Blend boreal/tundra
+              lr = lerp(lr, 72 + micro * 12, cold);
+              lg = lerp(lg, 96 + micro * 14, cold);
+              lb = lerp(lb, 78 + micro * 10, cold);
+
+              const off = (py * size + px) * 4;
+              landImg.data[off] = Math.max(0, Math.min(255, Math.round(lr)));
+              landImg.data[off + 1] = Math.max(0, Math.min(255, Math.round(lg)));
+              landImg.data[off + 2] = Math.max(0, Math.min(255, Math.round(lb)));
+              landImg.data[off + 3] = 255;
+
+              // Stratified rocky mountain texture
+              const mr = 102 + strata * 48 + micro * 18;
+              const mg = 88 + strata * 42 + micro * 16;
+              const mb = 78 + strata * 38 + micro * 15;
+              mtnImg.data[off] = Math.max(0, Math.min(255, Math.round(mr)));
+              mtnImg.data[off + 1] = Math.max(0, Math.min(255, Math.round(mg)));
+              mtnImg.data[off + 2] = Math.max(0, Math.min(255, Math.round(mb)));
+              mtnImg.data[off + 3] = 255;
+
+              // Fine sandy coast texture
+              coastImg.data[off] = Math.max(0, Math.min(255, Math.round(214 + micro * 22)));
+              coastImg.data[off + 1] = Math.max(0, Math.min(255, Math.round(196 + micro * 20)));
+              coastImg.data[off + 2] = Math.max(0, Math.min(255, Math.round(142 + micro * 16)));
+              coastImg.data[off + 3] = 255;
+            }
+          }
+          landCtx.putImageData(landImg, 0, 0);
+          mtnCtx.putImageData(mtnImg, 0, 0);
+          coastCtx.putImageData(coastImg, 0, 0);
+          return { landC, mtnC, coastC };
+        }
+
+        const oceanTexId = app.registerTexture(createOceanTexture());
+        const { landC, mtnC, coastC } = createPlanetBiomeTextures();
+        const landTexId = app.registerTexture(landC);
+        const mtnTexId = app.registerTexture(mtnC);
+        const coastTexId = app.registerTexture(coastC);
+
+        // Procedural 1024x1024 Solar Photosphere Texture (Granulation, Flares & Sunspots)
+        function createSunTexture() {
+          const size = 1024;
+          const canvas = document.createElement('canvas');
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext('2d');
+          const img = ctx.createImageData(size, size);
+          const data = img.data;
+
+          const spots = [];
+          for (let s = 0; s < 14; s++) {
+            const u = hash3(s, 41, 19);
+            const v = 0.28 + 0.44 * hash3(s, 53, 29); // sunspots cluster in solar belt latitudes
+            spots.push({
+              x: Math.sin(v * Math.PI) * Math.cos(u * Math.PI * 2),
+              y: Math.cos(v * Math.PI),
+              z: Math.sin(v * Math.PI) * Math.sin(u * Math.PI * 2),
+              r: 0.035 + hash3(s, 67, 31) * 0.055,
+            });
+          }
+
+          for (let py = 0; py < size; py++) {
+            const vCoord = 1 - py / (size - 1);
+            const phi = vCoord * Math.PI;
+            const sinP = Math.sin(phi);
+            const cosP = Math.cos(phi);
+            for (let px = 0; px < size; px++) {
+              const theta = (px / size) * Math.PI * 2;
+              const nx = Math.cos(theta) * sinP;
+              const ny = cosP;
+              const nz = Math.sin(theta) * sinP;
+
+              const plasma = fbm3(nx * 5.0 + 1.3, ny * 5.0 - 2.4, nz * 5.0 + 3.1, 4);
+              const granules = fbm3(nx * 24.0, ny * 24.0, nz * 24.0, 3);
+              const filaments = ridged3(nx * 7.5 - 1.1, ny * 7.5 + 2.2, nz * 7.5, 3);
+
+              let heat = 0.62 + plasma * 0.24 + granules * 0.14 + Math.max(0, filaments - 0.35) * 0.45;
+              for (let s = 0; s < spots.length; s++) {
+                const sp = spots[s];
+                const d = Math.hypot(nx - sp.x, ny - sp.y, nz - sp.z);
+                if (d < sp.r * 1.6) {
+                  const t = d / sp.r;
+                  if (t < 0.55) {
+                    heat -= 0.48 * (1 - t / 0.55); // dark umbra
+                  } else if (t < 1.15) {
+                    heat -= 0.22 * (1 - (t - 0.55) / 0.60); // penumbra
+                  } else {
+                    heat += 0.14 * (1 - (t - 1.15) / 0.45); // bright faculae ring
+                  }
+                }
+              }
+
+              heat = Math.max(0.08, Math.min(1.0, heat));
+              const off = (py * size + px) * 4;
+              data[off] = Math.round(lerp(135, 255, Math.min(1, heat * 1.25)));
+              data[off + 1] = Math.round(lerp(36, 245, Math.pow(heat, 1.35)));
+              data[off + 2] = Math.round(lerp(5, 195, Math.pow(heat, 2.6)));
+              data[off + 3] = 255;
+            }
+          }
+          ctx.putImageData(img, 0, 0);
+          return canvas;
+        }
+        sunMesh.texture = app.registerTexture(createSunTexture());
+
+        app.add(Sphere({
+          id: 'ocean',
+          parent: 'earth',
+          radius: R,
+          color: '#ffffff',
+          texture: oceanTexId,
+          metalness: 0.10,
+          roughness: 0.24,
+        }));
+
+        // Sculpted 3D Planetary Landscape Layers with Biomes & Rock Textures
+        app.add(Model({ id: 'earth-coast', parent: 'earth', url: PLANET_ASSETS.coast, color: '#ffffff', texture: coastTexId, roughness: 0.90 }));
+        app.add(Model({ id: 'earth-land', parent: 'earth', url: PLANET_ASSETS.land, color: '#ffffff', texture: landTexId, roughness: 0.85 }));
+        app.add(Model({ id: 'earth-mountains', parent: 'earth', url: PLANET_ASSETS.mountains, color: '#ffffff', texture: mtnTexId, roughness: 0.90 }));
         app.add(Model({ id: 'earth-snow', parent: 'earth', url: PLANET_ASSETS.snow, color: '#f1f5f9', roughness: 0.65 }));
 
         // Detailed 3D Tree Assets (.glb: pine in temperate/boreal, oak in tropical/subtropical)
@@ -395,86 +575,27 @@
           }));
         });
 
-        // Flight Arcs & Animated Planes
-        const routes = [
-          { from: [40, -74], to: [51, 0] },
-          { from: [48, 2], to: [35, 139] },
-          { from: [-23, -46], to: [22, 14] },
-        ];
-        const planes = [];
-        routes.forEach((route, rIdx) => {
-          const n0 = sphericalNormal(route.from[0], route.from[1]);
-          const n1 = sphericalNormal(route.to[0], route.to[1]);
-          const arcSteps = 16;
-          for (let s = 0; s < arcSteps; s++) {
-            const t0 = s / arcSteps;
-            const t1 = (s + 1) / arcSteps;
-            const interp = (t) => {
-              const x = n0[0] * (1 - t) + n1[0] * t;
-              const y = n0[1] * (1 - t) + n1[1] * t;
-              const z = n0[2] * (1 - t) + n1[2] * t;
-              const len = Math.hypot(x, y, z) || 1;
-              const alt = R + 0.06 + Math.sin(t * Math.PI) * 0.26;
-              return [(x / len) * alt, (y / len) * alt, (z / len) * alt];
-            };
-            app.add(Line({
-              id: `flight-arc-${rIdx}-${s}`,
-              parent: 'earth',
-              from: interp(t0),
-              to: interp(t1),
-              color: '#38bdf8',
-            }));
-          }
-          const planeMesh = app.add(Cone({
-            id: `plane-${rIdx}`,
-            parent: 'earth',
-            size: [0.06, 0.12, 0.06],
-            color: '#f8fafc',
-            emissive: 0.6,
-          }));
-          planes.push({ mesh: planeMesh, n0, n1, phase: rIdx * 0.33 });
+        // Real-Time Volumetric Raymarched Planetary Cloud Shell
+        app.setVolumetric({
+          enabled: true,
+          fogDensity: 0.0,
+          fogColor: '#93c5fd',
+          cloudMode: 'spherical',
+          planetCenter: [0, 0, 0],
+          planetRadius: R,
+          cloudAltitude: [0.34, 0.56],
+          cloudDensity: 3.1,
+          cloudCoverage: 0.56,
+          cloudScale: 1.45,
+          cloudSpeed: 0.16,
+          scatter: 0.68,
         });
 
-        // Multi-Puff Clouds
-        const clouds = app.add(Group({ id: 'clouds', position: [0, 0, 0] }));
-        const cloudSeeds = [
-          [22, 15], [14, 78], [-16, 145], [38, 215], [-26, 290], [52, 330], [5, 250], [-38, 45],
-          [44, 65], [-8, 15], [28, 140], [-45, 195], [60, 110], [-18, 235],
-        ];
-        cloudSeeds.forEach(([lat, lon], i) => {
-          const puffs = [
-            [0, 0, 0.14],
-            [3, 5, 0.11],
-            [-2, -5, 0.10],
-            [2, -3, 0.09],
-          ];
-          puffs.forEach(([dLat, dLon, rad], j) => {
-            const [nx, ny, nz] = sphericalNormal(lat + dLat, lon + dLon);
-            const cDist = R + 0.42 + (i % 2) * 0.04;
-            app.add(Sphere({
-              id: `cloud-${i}-${j}`,
-              parent: 'clouds',
-              position: [nx * cDist, ny * cDist, nz * cDist],
-              radius: rad,
-              color: '#f8fafc',
-              roughness: 0.95,
-            }));
-          });
-        });
+        // Moon + Satellites
 
-        // Torus Orbital Ring + Moon + Satellite
-        const orbitRing = app.add(Torus({
-          id: 'orbital-ring',
-          position: [0, 0, 0],
-          scale: [7.2, 0.18, 7.2],
-          color: [0.22, 0.74, 0.97, 0.35],
-          emissive: 0.4,
-        }));
-        quat.fromEuler(orbitRing.rotation, 0.10, 0, 0.08);
-
-        // Procedural 512x512 Moon Albedo Texture (Maria, Highlands, Impact Craters & Rays)
+        // Procedural 1024x1024 Moon Albedo Texture (Maria, Highlands, Impact Craters & Rays)
         function createMoonTexture() {
-          const size = 512;
+          const size = 1024;
           const canvas = document.createElement('canvas');
           canvas.width = size;
           canvas.height = size;
@@ -595,19 +716,6 @@
           simTime += dt;
 
           quat.fromEuler(earth.rotation, 0.18, simTime * 0.20, 0);
-          quat.fromEuler(clouds.rotation, 0.18, simTime * 0.32, 0);
-
-          for (const p of planes) {
-            const t = (simTime * 0.16 + p.phase) % 1;
-            const x = p.n0[0] * (1 - t) + p.n1[0] * t;
-            const y = p.n0[1] * (1 - t) + p.n1[1] * t;
-            const z = p.n0[2] * (1 - t) + p.n1[2] * t;
-            const len = Math.hypot(x, y, z) || 1;
-            const nx = x / len, ny = y / len, nz = z / len;
-            const alt = R + 0.08 + Math.sin(t * Math.PI) * 0.26;
-            p.mesh.setPosition(nx * alt, ny * alt, nz * alt);
-            alignUpToNormal(p.mesh, nx, ny, nz);
-          }
 
           const mAngle = simTime * 0.35;
           moon.setPosition(
@@ -632,6 +740,7 @@
           );
           quat.fromEuler(iss.rotation, 0.35, -issAngle, 0.2);
 
+          quat.fromEuler(sunMesh.rotation, 0.12, simTime * 0.08, 0);
           if (sunOrbit) {
             const sunA = simTime * 0.18 + 0.6;
             const sx = Math.cos(sunA) * sunRadius;
@@ -639,7 +748,6 @@
             const sz = Math.sin(sunA) * sunRadius;
             sunLight.setPosition(sx, sy, sz);
             sunMesh.setPosition(sx, sy, sz);
-            sunCorona.setPosition(sx, sy, sz);
           }
         });
 
