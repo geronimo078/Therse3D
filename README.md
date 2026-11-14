@@ -4,6 +4,8 @@
 
 `therse3d` combines a flat, Three.js-style imperative API and a declarative JSON state-sync API with a data-oriented Entity-Component-System (ECS) backed by contiguous `TypedArrays` and WebGPU storage buffers. It is designed from the ground up for **LLM code generation**, **AI agents (MCP / tool-calling)**, and **Vision-Language Models (VLMs)**.
 
+![therse3d Earth Globe Example — WebGPU PBR, Volumetric Clouds & God Rays](examples/earth-globe.png)
+
 ---
 
 ## Features
