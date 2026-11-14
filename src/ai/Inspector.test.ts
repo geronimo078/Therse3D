@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { Inspector, pickFromScreen, raycastStore } from './Inspector';
-import { WorldStore } from '../core/WorldStore';
+import { Inspector, pickFromScreen, projectWorldPoint, raycastStore } from './Inspector';
+import { DirtyFlag, WorldStore } from '../core/WorldStore';
 import { mat4 } from '../core/Math';
 
 function makeTestViewProj(): Float32Array {
@@ -113,6 +113,52 @@ describe('Inspector (Step 5)', () => {
     const screenHit = pickFromScreen(store, vp, 0.5, 0.5, (id) => names[id]);
     expect(screenHit).not.toBeNull();
     expect(screenHit!.id).toBe('target-box');
+  });
+
+  it('emits actionable suggestedFixes for colliding entities that resolve the overlap', () => {
+    const store = new WorldStore(8);
+    const vp = makeTestViewProj();
+
+    const aId = store.allocate();
+    store.positions.set([0, 0.5, 0], aId * 3);
+
+    const bId = store.allocate();
+    store.positions.set([0.3, 0.5, 0], bId * 3);
+
+    store.updateMatrices();
+
+    const inspector = new Inspector(store);
+    const names: Record<number, string> = { [aId]: 'crate-a', [bId]: 'crate-b' };
+    const desc = inspector.describe({ viewProjMatrix: vp, resolveName: (id) => names[id] });
+
+    expect(desc.suggestedFixes.length).toBe(1);
+    const fix = desc.suggestedFixes[0]!;
+    expect(fix.kind).toBe('resolve-collision');
+    expect(fix.patch.entities[0]!.id).toBe('crate-a');
+
+    // Apply the suggested fix position and verify collision is resolved
+    const [nx, ny, nz] = fix.patch.entities[0]!.position;
+    store.positions.set([nx, ny, nz], aId * 3);
+    store.dirtyFlags[aId] = DirtyFlag.Transform;
+    store.updateMatrices();
+
+    const after = inspector.describe({ viewProjMatrix: vp, resolveName: (id) => names[id] });
+    expect(after.suggestedFixes.length).toBe(0);
+    expect(after.entities.find((e) => e.id === 'crate-a')!.relations.collidingWith).toEqual([]);
+  });
+
+  it('projects 3D world points to viewport coordinates with projectWorldPoint', () => {
+    const vp = makeTestViewProj();
+
+    const center = projectWorldPoint(vp, [0, 0, 0], 1280, 720);
+    expect(center.visible).toBe(true);
+    expect(center.nx).toBeCloseTo(0.5, 3);
+    expect(center.ny).toBeCloseTo(0.5, 3);
+    expect(center.x).toBeCloseTo(640, 1);
+    expect(center.y).toBeCloseTo(360, 1);
+
+    const behind = projectWorldPoint(vp, [0, 2, 20], 1280, 720);
+    expect(behind.visible).toBe(false);
   });
 });
 

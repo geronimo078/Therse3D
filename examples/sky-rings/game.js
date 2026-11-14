@@ -55,6 +55,7 @@ try {
     scatter: 0.65,
     godRays: 0.65,
   });
+  app.setBloom({ enabled: true, threshold: 0.78, intensity: 0.55, radius: 1.5 });
 
   // Ocean Floor
   app.add(Plane({

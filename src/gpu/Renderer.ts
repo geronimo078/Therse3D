@@ -17,7 +17,15 @@ import type { Camera } from '../controls/OrbitControls';
 import pbrShaderCode from './shaders/pbr.wgsl?raw';
 import idDepthShaderCode from './shaders/id_depth.wgsl?raw';
 import volumetricShaderCode from './shaders/volumetric.wgsl?raw';
+import bloomShaderCode from './shaders/bloom.wgsl?raw';
 import { parseColor } from '../entities/Materials';
+
+export interface BloomConfig {
+  enabled?: boolean;
+  threshold?: number;
+  intensity?: number;
+  radius?: number;
+}
 
 export interface VolumetricConfig {
   enabled?: boolean;
@@ -176,6 +184,8 @@ export class Renderer {
   private msaaColorView: GPUTextureView | null = null;
   private sceneColorTexture: GPUTexture | null = null;
   private sceneColorView: GPUTextureView | null = null;
+  private postColorTexture: GPUTexture | null = null;
+  private postColorView: GPUTextureView | null = null;
   private depthTexture: GPUTexture | null = null;
   private depthView: GPUTextureView | null = null;
   private rtWidth = 0;
@@ -204,6 +214,22 @@ export class Renderer {
     planetCenter: [0, 0, 0],
     scatter: 0.62,
     godRays: 0.85,
+  };
+
+  // Bloom Post-Pass (lazily initialized on enable)
+  private bloomEnabled = false;
+  private bloomPipeline: GPURenderPipeline | null = null;
+  private bloomBindGroupLayout: GPUBindGroupLayout | null = null;
+  private bloomBindGroupScene: GPUBindGroup | null = null;
+  private bloomBindGroupPost: GPUBindGroup | null = null;
+  private bloomUniformBuffer: GPUBuffer | null = null;
+  private bloomSampler: GPUSampler | null = null;
+  private readonly bloomScratch = new Float32Array(8); // 32 bytes
+  private bloomConfig: Required<BloomConfig> = {
+    enabled: false,
+    threshold: 0.78,
+    intensity: 0.65,
+    radius: 1.5,
   };
 
   constructor(gpu: GPUDeviceContext, store: WorldStore, preset: EnginePreset = 'studio') {
@@ -690,6 +716,86 @@ export class Renderer {
     });
   }
 
+  setBloom(config: BloomConfig): void {
+    if (config.enabled !== undefined) this.bloomConfig.enabled = Boolean(config.enabled);
+    if (config.threshold !== undefined && Number.isFinite(config.threshold)) {
+      this.bloomConfig.threshold = Math.min(2.0, Math.max(0.0, config.threshold));
+    }
+    if (config.intensity !== undefined && Number.isFinite(config.intensity)) {
+      this.bloomConfig.intensity = Math.min(3.0, Math.max(0.0, config.intensity));
+    }
+    if (config.radius !== undefined && Number.isFinite(config.radius)) {
+      this.bloomConfig.radius = Math.min(5.0, Math.max(0.25, config.radius));
+    }
+    this.bloomEnabled = this.bloomConfig.enabled;
+  }
+
+  private ensureBloomPipeline(): void {
+    if (this.bloomPipeline) return;
+    const device = this.gpu.device;
+    this.bloomUniformBuffer = this.buffers.createUniformBuffer(
+      this.bloomScratch.byteLength,
+      'bloom-uniforms',
+    );
+    this.bloomSampler = device.createSampler({
+      label: 'bloom-linear-sampler',
+      magFilter: 'linear',
+      minFilter: 'linear',
+      addressModeU: 'clamp-to-edge',
+      addressModeV: 'clamp-to-edge',
+    });
+    this.bloomBindGroupLayout = device.createBindGroupLayout({
+      label: 'bloom-bind-group-layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      ],
+    });
+    const mod = device.createShaderModule({ label: 'bloom-shader', code: bloomShaderCode });
+    this.bloomPipeline = device.createRenderPipeline({
+      label: 'bloom-pipeline',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.bloomBindGroupLayout] }),
+      vertex: { module: mod, entryPoint: 'vs_bloom' },
+      fragment: {
+        module: mod,
+        entryPoint: 'fs_bloom',
+        targets: [{ format: this.gpu.format }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+  }
+
+  private rebuildBloomBindGroups(): void {
+    if (
+      !this.bloomBindGroupLayout ||
+      !this.bloomUniformBuffer ||
+      !this.bloomSampler ||
+      !this.sceneColorView ||
+      !this.postColorView
+    ) {
+      return;
+    }
+    this.bloomBindGroupScene = this.gpu.device.createBindGroup({
+      label: 'bloom-bind-group-scene',
+      layout: this.bloomBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.bloomUniformBuffer } },
+        { binding: 1, resource: this.sceneColorView },
+        { binding: 2, resource: this.bloomSampler },
+      ],
+    });
+    this.bloomBindGroupPost = this.gpu.device.createBindGroup({
+      label: 'bloom-bind-group-post',
+      layout: this.bloomBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.bloomUniformBuffer } },
+        { binding: 1, resource: this.postColorView },
+        { binding: 2, resource: this.bloomSampler },
+      ],
+    });
+  }
+
   private ensureRenderTargets(width: number, height: number): void {
     if (this.rtWidth === width && this.rtHeight === height && this.depthView && this.msaaColorView) {
       return;
@@ -697,6 +803,7 @@ export class Renderer {
 
     if (this.msaaColorTexture) this.buffers.destroyTexture(this.msaaColorTexture);
     if (this.sceneColorTexture) this.buffers.destroyTexture(this.sceneColorTexture);
+    if (this.postColorTexture) this.buffers.destroyTexture(this.postColorTexture);
     if (this.depthTexture) this.buffers.destroyTexture(this.depthTexture);
 
     this.rtWidth = width;
@@ -719,6 +826,14 @@ export class Renderer {
     });
     this.sceneColorView = this.sceneColorTexture.createView();
 
+    this.postColorTexture = this.buffers.createTexture({
+      label: 'post-color-intermediate',
+      size: [width, height],
+      format: this.gpu.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.postColorView = this.postColorTexture.createView();
+
     this.depthTexture = this.buffers.createTexture({
       label: 'depth-24plus',
       size: [width, height],
@@ -728,6 +843,7 @@ export class Renderer {
     });
     this.depthView = this.depthTexture.createView();
     this.rebuildVolumetricBindGroup();
+    this.rebuildBloomBindGroups();
   }
 
   renderFrame(camera?: Camera, elapsed = 0): void {
@@ -890,10 +1006,18 @@ export class Renderer {
     this.recordShadowPass(encoder, counts, offsets);
     const swapchainView = this.gpu.context.getCurrentTexture().createView();
     const useVolumetric = this.volumetricEnabled;
+    const useBloom = this.bloomEnabled;
+    const usePost = useVolumetric || useBloom;
     if (useVolumetric) {
       this.ensureVolumetricPipeline();
       if (!this.volumetricBindGroup) {
         this.rebuildVolumetricBindGroup();
+      }
+    }
+    if (useBloom) {
+      this.ensureBloomPipeline();
+      if (!this.bloomBindGroupScene || !this.bloomBindGroupPost) {
+        this.rebuildBloomBindGroups();
       }
     }
 
@@ -901,7 +1025,7 @@ export class Renderer {
       colorAttachments: [
         {
           view: this.msaaColorView!,
-          resolveTarget: useVolumetric ? this.sceneColorView! : swapchainView,
+          resolveTarget: usePost ? this.sceneColorView! : swapchainView,
           clearValue: presetCfg.clearColor,
           loadOp: 'clear',
           storeOp: 'discard',
@@ -1002,7 +1126,7 @@ export class Renderer {
       const vPass = encoder.beginRenderPass({
         colorAttachments: [
           {
-            view: swapchainView,
+            view: useBloom ? this.postColorView! : swapchainView,
             clearValue: presetCfg.clearColor,
             loadOp: 'clear',
             storeOp: 'store',
@@ -1013,6 +1137,38 @@ export class Renderer {
       vPass.setBindGroup(0, this.volumetricBindGroup);
       vPass.draw(3);
       vPass.end();
+    }
+
+    if (useBloom && this.bloomPipeline && this.bloomUniformBuffer) {
+      const bloomBindGroup = useVolumetric ? this.bloomBindGroupPost : this.bloomBindGroupScene;
+      if (bloomBindGroup) {
+        const bs = this.bloomScratch;
+        const bc = this.bloomConfig;
+        bs[0] = 1.0 / Math.max(1, this.rtWidth);
+        bs[1] = 1.0 / Math.max(1, this.rtHeight);
+        bs[2] = bc.threshold;
+        bs[3] = bc.intensity;
+        bs[4] = bc.radius;
+        bs[5] = 0;
+        bs[6] = 0;
+        bs[7] = 0;
+        this.buffers.writeBuffer(this.bloomUniformBuffer, bs);
+
+        const bPass = encoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: swapchainView,
+              clearValue: presetCfg.clearColor,
+              loadOp: 'clear',
+              storeOp: 'store',
+            },
+          ],
+        });
+        bPass.setPipeline(this.bloomPipeline);
+        bPass.setBindGroup(0, bloomBindGroup);
+        bPass.draw(3);
+        bPass.end();
+      }
     }
 
     this.gpu.device.queue.submit([encoder.finish()]);

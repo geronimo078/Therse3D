@@ -36,10 +36,33 @@ export interface EntityDescription {
   relations: EntityRelations;
 }
 
+export interface SuggestedFix {
+  kind: 'resolve-collision';
+  entityId: string;
+  otherEntityId: string;
+  reason: string;
+  patch: {
+    entities: Array<{
+      id: string;
+      position: [number, number, number];
+    }>;
+  };
+}
+
+export interface ProjectedPoint {
+  x: number;
+  y: number;
+  nx: number;
+  ny: number;
+  ndc: [number, number, number];
+  visible: boolean;
+}
+
 export interface SceneDescription {
   entityCount: number;
   entities: EntityDescription[];
   warnings: string[];
+  suggestedFixes: SuggestedFix[];
 }
 
 export interface DescribeContext {
@@ -68,6 +91,7 @@ export class Inspector {
 
     const activeIds: number[] = [];
     const names: string[] = [];
+    const suggestedFixes: SuggestedFix[] = [];
 
     for (let i = 0; i < store.highWaterMark; i++) {
       if (store.alive[i] === 0) continue;
@@ -131,6 +155,16 @@ export class Inspector {
           relations.collidingWith.push(otherName);
           if (id < otherId) {
             warnings.push(`Entity '${name}' intersects with '${otherName}'`);
+            suggestedFixes.push(
+              buildCollisionFix(
+                name,
+                otherName,
+                px, py, pz,
+                minX, minY, minZ, maxX, maxY, maxZ,
+                oMinX, oMinY, oMinZ, oMaxX, oMaxY, oMaxZ,
+                xOverlap, yOverlap, zOverlap,
+              ),
+            );
           }
         } else {
           // Distance between AABBs
@@ -160,8 +194,105 @@ export class Inspector {
       entityCount: entities.length,
       entities,
       warnings,
+      suggestedFixes,
     };
   }
+}
+
+const FIX_CLEARANCE = 0.05;
+
+function buildCollisionFix(
+  entityId: string,
+  otherEntityId: string,
+  px: number, py: number, pz: number,
+  minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number,
+  oMinX: number, oMinY: number, oMinZ: number, oMaxX: number, oMaxY: number, oMaxZ: number,
+  xOverlap: number, yOverlap: number, zOverlap: number,
+): SuggestedFix {
+  const cx = (minX + maxX) * 0.5;
+  const cy = (minY + maxY) * 0.5;
+  const cz = (minZ + maxZ) * 0.5;
+  const ocx = (oMinX + oMaxX) * 0.5;
+  const ocy = (oMinY + oMaxY) * 0.5;
+  const ocz = (oMinZ + oMaxZ) * 0.5;
+
+  let nx = px;
+  let ny = py;
+  let nz = pz;
+
+  if (yOverlap <= xOverlap && yOverlap <= zOverlap) {
+    // Prefer lifting above the other entity if centers are close or entity is above
+    const dir = cy >= ocy ? 1 : -1;
+    ny = py + dir * (yOverlap + FIX_CLEARANCE);
+  } else if (xOverlap <= zOverlap) {
+    const dir = cx >= ocx ? 1 : -1;
+    nx = px + dir * (xOverlap + FIX_CLEARANCE);
+  } else {
+    const dir = cz >= ocz ? 1 : -1;
+    nz = pz + dir * (zOverlap + FIX_CLEARANCE);
+  }
+
+  return {
+    kind: 'resolve-collision',
+    entityId,
+    otherEntityId,
+    reason: `Separate '${entityId}' from '${otherEntityId}' along minimum penetration axis.`,
+    patch: {
+      entities: [
+        {
+          id: entityId,
+          position: [
+            Math.round(nx * 1000) / 1000,
+            Math.round(ny * 1000) / 1000,
+            Math.round(nz * 1000) / 1000,
+          ],
+        },
+      ],
+    },
+  };
+}
+
+export function projectWorldPoint(
+  vp: Float32Array,
+  point: readonly [number, number, number],
+  viewportWidth: number,
+  viewportHeight: number,
+): ProjectedPoint {
+  const x = point[0] ?? 0;
+  const y = point[1] ?? 0;
+  const z = point[2] ?? 0;
+
+  const cx = (vp[0] ?? 0) * x + (vp[4] ?? 0) * y + (vp[8] ?? 0) * z + (vp[12] ?? 0);
+  const cy = (vp[1] ?? 0) * x + (vp[5] ?? 0) * y + (vp[9] ?? 0) * z + (vp[13] ?? 0);
+  const cz = (vp[2] ?? 0) * x + (vp[6] ?? 0) * y + (vp[10] ?? 0) * z + (vp[14] ?? 0);
+  const cw = (vp[3] ?? 0) * x + (vp[7] ?? 0) * y + (vp[11] ?? 0) * z + (vp[15] ?? 1);
+
+  if (cw <= 1e-4) {
+    return {
+      x: 0,
+      y: 0,
+      nx: 0,
+      ny: 0,
+      ndc: [0, 0, -1],
+      visible: false,
+    };
+  }
+
+  const ndcX = cx / cw;
+  const ndcY = cy / cw;
+  const ndcZ = cz / cw;
+  const nx = (ndcX + 1) * 0.5;
+  const ny = (1 - ndcY) * 0.5;
+  const visible = ndcX >= -1 && ndcX <= 1 && ndcY >= -1 && ndcY <= 1 && ndcZ >= 0 && ndcZ <= 1;
+
+  return {
+    x: nx * Math.max(1, viewportWidth),
+    y: ny * Math.max(1, viewportHeight),
+    nx,
+    ny,
+    ndc: [ndcX, ndcY, ndcZ],
+    visible,
+  };
 }
 
 function projectAABB(

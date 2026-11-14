@@ -9,11 +9,13 @@ import {
   type SceneSyncState,
 } from './SceneSync';
 import { GPUDeviceContext } from '../gpu/Device';
-import { Renderer, type VolumetricConfig } from '../gpu/Renderer';
+import { Renderer, type BloomConfig, type VolumetricConfig } from '../gpu/Renderer';
 import {
   Inspector,
   pickFromScreen,
+  projectWorldPoint,
   raycastStore,
+  type ProjectedPoint,
   type RaycastHit,
   type SceneDescription,
 } from '../ai/Inspector';
@@ -339,6 +341,11 @@ export class Engine {
     return this;
   }
 
+  setBloom(config: BloomConfig): this {
+    this.renderer.setBloom(config);
+    return this;
+  }
+
   registerTexture(
     source: ImageBitmap | HTMLCanvasElement | OffscreenCanvas | Uint8Array | Uint8ClampedArray,
     width?: number,
@@ -530,6 +537,35 @@ export class Engine {
     const ny = options?.normalized ? y : y / h;
     const vp = this.camera.updateMatrices(Math.max(1, canvas.width) / Math.max(1, canvas.height));
     return pickFromScreen(this.store, vp, nx, ny, (id) => this.entitiesById.get(id)?.name);
+  }
+
+  project(
+    target: string | number | EntityHandle | readonly [number, number, number],
+  ): ProjectedPoint | null {
+    let point: readonly [number, number, number];
+    if (Array.isArray(target)) {
+      point = target as readonly [number, number, number];
+    } else if (target instanceof EntityHandle) {
+      point = [
+        this.store.positions[target.id * 3] ?? 0,
+        this.store.positions[target.id * 3 + 1] ?? 0,
+        this.store.positions[target.id * 3 + 2] ?? 0,
+      ];
+    } else {
+      const handle = this.get(target as string | number);
+      if (!handle) return null;
+      point = [
+        this.store.positions[handle.id * 3] ?? 0,
+        this.store.positions[handle.id * 3 + 1] ?? 0,
+        this.store.positions[handle.id * 3 + 2] ?? 0,
+      ];
+    }
+
+    const canvas = this.gpu.canvas;
+    const w = Math.max(1, canvas.clientWidth || canvas.width);
+    const h = Math.max(1, canvas.clientHeight || canvas.height);
+    const vp = this.camera.updateMatrices(Math.max(1, canvas.width) / Math.max(1, canvas.height));
+    return projectWorldPoint(vp, point, w, h);
   }
 
   async snapshot(options?: SnapshotOptions): Promise<SnapshotResult> {

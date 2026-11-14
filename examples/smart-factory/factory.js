@@ -86,6 +86,7 @@ async function init() {
   try {
     const app = await Engine.create('#canvas', { preset: 'studio' });
     app.use(OrbitControls({ distance: 13.5, target: [0, 1.0, 0] }));
+    app.setBloom({ enabled: true, threshold: 0.72, intensity: 0.6, radius: 1.5 });
     const mcp = new McpBridge(app);
 
     let placeHazardMode = false;
@@ -286,6 +287,7 @@ async function init() {
       setLog('therse_inspect', {
         entityCount: desc.entityCount,
         warnings: desc.warnings,
+        suggestedFixes: desc.suggestedFixes,
         sampleEntities: desc.entities.slice(0, 6).map((e) => ({
           id: e.id,
           screenRegion: e.screenRegion,
@@ -348,9 +350,11 @@ async function init() {
 
       const desc = app.describe();
       const entity = desc.entities.find((item) => item.id === hit.id);
+      const projected = app.project(hit.id);
       setLog(`app.pick -> "${hit.id}"`, {
         distance: Number(hit.distance.toFixed(2)),
         hitPoint: hit.point.map((v) => Number(v.toFixed(2))),
+        screenPixel: projected ? [Math.round(projected.x), Math.round(projected.y)] : null,
         spatialDescription: entity ?? null,
       });
     });
