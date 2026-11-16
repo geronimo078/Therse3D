@@ -19,8 +19,8 @@ export {
   type SceneSyncHooks,
 } from './core/SceneSync';
 
-export { GPUDeviceContext } from './gpu/Device';
-export { Renderer, type BloomConfig, type VolumetricConfig } from './gpu/Renderer';
+export { GPUDeviceContext, type GPUDeviceInitOptions, type QualityMode } from './gpu/Device';
+export { Renderer, type BloomConfig, type RendererOptions, type VolumetricConfig } from './gpu/Renderer';
 export { BufferManager } from './gpu/BufferManager';
 
 export { EntityHandle, type Vec3Like, type Vec4Like } from './entities/EntityHandle';

@@ -1,4 +1,4 @@
-import type { GPUDeviceContext } from './Device';
+import type { GPUDeviceContext, QualityMode } from './Device';
 import { mat4 } from '../core/Math';
 import { DirtyFlag, GeometryTypeId, MAX_MORPH_TARGETS, type WorldStore } from '../core/WorldStore';
 import { BufferManager } from './BufferManager';
@@ -124,13 +124,13 @@ export interface CapturePassResult {
   depth: Float32Array | null;
 }
 
-const MSAA_SAMPLE_COUNT = 4;
-const SHADOW_MAP_SIZE = 2048;
-const TEXTURE_SIZE = 1024;
-const MAX_TEXTURES = 16;
+export interface RendererOptions {
+  quality?: QualityMode;
+  antialias?: boolean;
+}
 
 /**
- * WebGPU Instanced PBR-Renderer mit MSAA (4x), Depth-Buffer & Zero-Allocation Render-Loop.
+ * WebGPU Instanced PBR-Renderer mit optionalem MSAA (4x / 1x Low-Spec), Depth-Buffer & Zero-Allocation Render-Loop.
  */
 export class Renderer {
   readonly gpu: GPUDeviceContext;
@@ -138,6 +138,11 @@ export class Renderer {
   readonly buffers: BufferManager;
   readonly pbrShaderSource: string;
   readonly idDepthShaderSource: string;
+  readonly isLowSpec: boolean;
+  readonly sampleCount: number;
+  readonly shadowMapSize: number;
+  readonly textureSize: number;
+  readonly maxTextures: number;
 
   private preset: EnginePreset;
   private readonly pipeline: GPURenderPipeline;
@@ -240,10 +245,20 @@ export class Renderer {
     radius: 1.5,
   };
 
-  constructor(gpu: GPUDeviceContext, store: WorldStore, preset: EnginePreset = 'studio') {
+  constructor(
+    gpu: GPUDeviceContext,
+    store: WorldStore,
+    preset: EnginePreset = 'studio',
+    options: RendererOptions = {},
+  ) {
     this.gpu = gpu;
     this.store = store;
     this.preset = preset;
+    this.isLowSpec = options.quality === 'low' || (options.quality !== 'high' && gpu.isLowSpec);
+    this.sampleCount = options.antialias === false || this.isLowSpec ? 1 : 4;
+    this.shadowMapSize = this.isLowSpec ? 1024 : 2048;
+    this.textureSize = this.isLowSpec ? 512 : 1024;
+    this.maxTextures = this.isLowSpec ? 8 : 16;
     this.buffers = new BufferManager(gpu.device);
     this.pbrShaderSource = pbrShaderCode;
     this.idDepthShaderSource = idDepthShaderCode;
@@ -252,7 +267,7 @@ export class Renderer {
 
     this.shadowTexture = this.buffers.createTexture({
       label: 'directional-shadow-map',
-      size: [SHADOW_MAP_SIZE, SHADOW_MAP_SIZE],
+      size: [this.shadowMapSize, this.shadowMapSize],
       format: 'depth24plus',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
@@ -266,7 +281,7 @@ export class Renderer {
 
     this.albedoTextureArray = this.buffers.createTexture({
       label: 'albedo-texture-array',
-      size: [TEXTURE_SIZE, TEXTURE_SIZE, MAX_TEXTURES],
+      size: [this.textureSize, this.textureSize, this.maxTextures],
       format: 'rgba8unorm-srgb',
       usage:
         GPUTextureUsage.TEXTURE_BINDING |
@@ -274,17 +289,17 @@ export class Renderer {
         GPUTextureUsage.RENDER_ATTACHMENT,
     });
     // Layer 0 = solid white fallback so untextured entities sample (1, 1, 1, 1)
-    const whiteLayer = new Uint8Array(TEXTURE_SIZE * TEXTURE_SIZE * 4);
+    const whiteLayer = new Uint8Array(this.textureSize * this.textureSize * 4);
     whiteLayer.fill(255);
     gpu.device.queue.writeTexture(
       { texture: this.albedoTextureArray, origin: [0, 0, 0] },
       whiteLayer,
-      { bytesPerRow: TEXTURE_SIZE * 4, rowsPerImage: TEXTURE_SIZE },
-      [TEXTURE_SIZE, TEXTURE_SIZE, 1],
+      { bytesPerRow: this.textureSize * 4, rowsPerImage: this.textureSize },
+      [this.textureSize, this.textureSize, 1],
     );
     this.albedoTextureView = this.albedoTextureArray.createView({
       dimension: '2d-array',
-      arrayLayerCount: MAX_TEXTURES,
+      arrayLayerCount: this.maxTextures,
     });
     this.albedoSampler = gpu.device.createSampler({
       label: 'albedo-sampler',
@@ -356,7 +371,7 @@ export class Renderer {
         depthCompare: 'less',
       },
       multisample: {
-        count: MSAA_SAMPLE_COUNT,
+        count: this.sampleCount,
       },
     });
 
@@ -400,7 +415,7 @@ export class Renderer {
         depthCompare: 'less',
       },
       multisample: {
-        count: MSAA_SAMPLE_COUNT,
+        count: this.sampleCount,
       },
     });
 
@@ -435,7 +450,7 @@ export class Renderer {
         depthCompare: 'less',
       },
       multisample: {
-        count: MSAA_SAMPLE_COUNT,
+        count: this.sampleCount,
       },
     });
 
@@ -505,14 +520,14 @@ export class Renderer {
       indexFormat: data.indices instanceof Uint32Array ? 'uint32' : 'uint16',
       ...(hasMorphs
         ? {
-            morph: {
-              baseVertices: new Float32Array(data.vertices),
-              morphedVertices: new Float32Array(data.vertices),
-              morphTargets: data.morphTargets!,
-              targetNames: data.morphTargets!.map((t) => t.name),
-              perEntityBuffers: new Map<number, GPUBuffer>(),
-            },
-          }
+          morph: {
+            baseVertices: new Float32Array(data.vertices),
+            morphedVertices: new Float32Array(data.vertices),
+            morphTargets: data.morphTargets!,
+            targetNames: data.morphTargets!.map((t) => t.name),
+            perEntityBuffers: new Map<number, GPUBuffer>(),
+          },
+        }
         : {}),
     });
     return id;
@@ -541,31 +556,32 @@ export class Renderer {
     width?: number,
     height?: number,
   ): number {
-    if (this.nextTextureLayer >= MAX_TEXTURES) {
-      console.warn(`therse3d: Texture array capacity (${MAX_TEXTURES - 1}) reached; falling back to default texture.`);
+    if (this.nextTextureLayer >= this.maxTextures) {
+      console.warn(`therse3d: Texture array capacity (${this.maxTextures - 1}) reached; falling back to default texture.`);
       return 0;
     }
     const layer = this.nextTextureLayer++;
+    const texSize = this.textureSize;
 
     if (source instanceof Uint8Array || source instanceof Uint8ClampedArray) {
-      const w = Math.max(1, width ?? TEXTURE_SIZE);
-      const h = Math.max(1, height ?? TEXTURE_SIZE);
-      if (w === TEXTURE_SIZE && h === TEXTURE_SIZE) {
+      const w = Math.max(1, width ?? texSize);
+      const h = Math.max(1, height ?? texSize);
+      if (w === texSize && h === texSize) {
         this.gpu.device.queue.writeTexture(
           { texture: this.albedoTextureArray, origin: [0, 0, layer] },
           source.buffer as ArrayBuffer,
-          { offset: source.byteOffset, bytesPerRow: TEXTURE_SIZE * 4, rowsPerImage: TEXTURE_SIZE },
-          [TEXTURE_SIZE, TEXTURE_SIZE, 1],
+          { offset: source.byteOffset, bytesPerRow: texSize * 4, rowsPerImage: texSize },
+          [texSize, texSize, 1],
         );
       } else {
-        // Nearest/bilinear resample into 512x512 RGBA8 buffer
-        const resampled = new Uint8Array(TEXTURE_SIZE * TEXTURE_SIZE * 4);
-        for (let y = 0; y < TEXTURE_SIZE; y++) {
-          const sy = Math.min(h - 1, Math.floor((y / TEXTURE_SIZE) * h));
-          for (let x = 0; x < TEXTURE_SIZE; x++) {
-            const sx = Math.min(w - 1, Math.floor((x / TEXTURE_SIZE) * w));
+        // Nearest/bilinear resample into texSize x texSize RGBA8 buffer
+        const resampled = new Uint8Array(texSize * texSize * 4);
+        for (let y = 0; y < texSize; y++) {
+          const sy = Math.min(h - 1, Math.floor((y / texSize) * h));
+          for (let x = 0; x < texSize; x++) {
+            const sx = Math.min(w - 1, Math.floor((x / texSize) * w));
             const sOff = (sy * w + sx) * 4;
-            const dOff = (y * TEXTURE_SIZE + x) * 4;
+            const dOff = (y * texSize + x) * 4;
             resampled[dOff] = source[sOff] ?? 255;
             resampled[dOff + 1] = source[sOff + 1] ?? 255;
             resampled[dOff + 2] = source[sOff + 2] ?? 255;
@@ -575,24 +591,24 @@ export class Renderer {
         this.gpu.device.queue.writeTexture(
           { texture: this.albedoTextureArray, origin: [0, 0, layer] },
           resampled,
-          { bytesPerRow: TEXTURE_SIZE * 4, rowsPerImage: TEXTURE_SIZE },
-          [TEXTURE_SIZE, TEXTURE_SIZE, 1],
+          { bytesPerRow: texSize * 4, rowsPerImage: texSize },
+          [texSize, texSize, 1],
         );
       }
       return layer;
     }
 
     let uploadSource: ImageBitmap | HTMLCanvasElement | OffscreenCanvas = source;
-    if (source.width !== TEXTURE_SIZE || source.height !== TEXTURE_SIZE) {
+    if (source.width !== texSize || source.height !== texSize) {
       const canvas =
         typeof OffscreenCanvas !== 'undefined'
-          ? new OffscreenCanvas(TEXTURE_SIZE, TEXTURE_SIZE)
+          ? new OffscreenCanvas(texSize, texSize)
           : document.createElement('canvas');
-      canvas.width = TEXTURE_SIZE;
-      canvas.height = TEXTURE_SIZE;
+      canvas.width = texSize;
+      canvas.height = texSize;
       const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
       if (ctx) {
-        ctx.drawImage(source, 0, 0, TEXTURE_SIZE, TEXTURE_SIZE);
+        ctx.drawImage(source, 0, 0, texSize, texSize);
         uploadSource = canvas;
       }
     }
@@ -600,7 +616,7 @@ export class Renderer {
     this.gpu.device.queue.copyExternalImageToTexture(
       { source: uploadSource, flipY: false },
       { texture: this.albedoTextureArray, origin: [0, 0, layer] },
-      [TEXTURE_SIZE, TEXTURE_SIZE],
+      [texSize, texSize],
     );
     return layer;
   }
@@ -709,15 +725,19 @@ export class Renderer {
       this.volumetricScratch.byteLength,
       'volumetric-uniforms',
     );
+    const isMsaa = this.sampleCount > 1;
     this.volumetricBindGroupLayout = device.createBindGroupLayout({
       label: 'volumetric-bind-group-layout',
       entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth', multisampled: true } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth', multisampled: isMsaa } },
       ],
     });
-    const mod = device.createShaderModule({ label: 'volumetric-shader', code: volumetricShaderCode });
+    const volCode = isMsaa
+      ? volumetricShaderCode
+      : volumetricShaderCode.replace('texture_depth_multisampled_2d', 'texture_depth_2d');
+    const mod = device.createShaderModule({ label: 'volumetric-shader', code: volCode });
     this.volumetricPipeline = device.createRenderPipeline({
       label: 'volumetric-pipeline',
       layout: device.createPipelineLayout({ bindGroupLayouts: [this.volumetricBindGroupLayout] }),
@@ -827,7 +847,12 @@ export class Renderer {
   }
 
   private ensureRenderTargets(width: number, height: number): void {
-    if (this.rtWidth === width && this.rtHeight === height && this.depthView && this.msaaColorView) {
+    if (
+      this.rtWidth === width &&
+      this.rtHeight === height &&
+      this.depthView &&
+      (this.sampleCount === 1 || this.msaaColorView)
+    ) {
       return;
     }
 
@@ -835,18 +860,22 @@ export class Renderer {
     if (this.sceneColorTexture) this.buffers.destroyTexture(this.sceneColorTexture);
     if (this.postColorTexture) this.buffers.destroyTexture(this.postColorTexture);
     if (this.depthTexture) this.buffers.destroyTexture(this.depthTexture);
+    this.msaaColorTexture = null;
+    this.msaaColorView = null;
 
     this.rtWidth = width;
     this.rtHeight = height;
 
-    this.msaaColorTexture = this.buffers.createTexture({
-      label: 'msaa-color',
-      size: [width, height],
-      sampleCount: MSAA_SAMPLE_COUNT,
-      format: this.gpu.format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT,
-    });
-    this.msaaColorView = this.msaaColorTexture.createView();
+    if (this.sampleCount > 1) {
+      this.msaaColorTexture = this.buffers.createTexture({
+        label: 'msaa-color',
+        size: [width, height],
+        sampleCount: this.sampleCount,
+        format: this.gpu.format,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      this.msaaColorView = this.msaaColorTexture.createView();
+    }
 
     this.sceneColorTexture = this.buffers.createTexture({
       label: 'scene-color-resolve',
@@ -867,7 +896,7 @@ export class Renderer {
     this.depthTexture = this.buffers.createTexture({
       label: 'depth-24plus',
       size: [width, height],
-      sampleCount: MSAA_SAMPLE_COUNT,
+      sampleCount: this.sampleCount,
       format: 'depth24plus',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
@@ -1052,15 +1081,23 @@ export class Renderer {
       }
     }
 
+    const targetView = usePost ? this.sceneColorView! : swapchainView;
     const pass = encoder.beginRenderPass({
       colorAttachments: [
-        {
-          view: this.msaaColorView!,
-          resolveTarget: usePost ? this.sceneColorView! : swapchainView,
-          clearValue: presetCfg.clearColor,
-          loadOp: 'clear',
-          storeOp: 'discard',
-        },
+        this.sampleCount > 1
+          ? {
+              view: this.msaaColorView!,
+              resolveTarget: targetView,
+              clearValue: presetCfg.clearColor,
+              loadOp: 'clear',
+              storeOp: 'discard',
+            }
+          : {
+              view: targetView,
+              clearValue: presetCfg.clearColor,
+              loadOp: 'clear',
+              storeOp: 'store',
+            },
       ],
       depthStencilAttachment: {
         view: this.depthView!,

@@ -1,33 +1,42 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>therse3d — Basic Example</title>
-    <style>
-      html, body { margin: 0; height: 100%; overflow: hidden; background: #141720; }
-    </style>
-  </head>
-  <body>
-    <script type="module">
-      import { Engine, Box, Sphere, Plane, OrbitControls } from '../src/index.ts';
 
-      try {
-        const app = await Engine.create({ preset: 'studio' });
-        app.add(Plane({ id: 'floor', size: [8, 1, 8], material: 'matte-plastic' }));
-        app.add(Box({ id: 'table', size: [2.4, 0.12, 1.2], position: [0, 0.75, 0], material: 'oak-wood' }));
-        const orb = app.add(Sphere({ id: 'orb', radius: 0.25, on: 'table', align: 'center', color: '#00aaff', metalness: 0.8, roughness: 0.15 }));
-        app.use(OrbitControls());
-        app.camera.fitAll({ padding: 1.3 });
-        app.onTick((_dt, elapsed) => {
-          orb.position[1] = 1.06 + Math.sin(elapsed * 2.5) * 0.12;
-        });
-      } catch (err) {
-        const msg = document.createElement('pre');
-        msg.style.cssText = 'position:fixed;top:12px;left:12px;padding:10px 14px;background:rgba(15,23,42,0.9);color:#f87171;border-radius:6px;font:13px/1.4 monospace;z-index:10;';
-        msg.textContent = err instanceof Error ? err.message : String(err);
-        document.body.appendChild(msg);
-      }
-    </script>
-  </body>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>therse3d — Basic Example</title>
+  <style>
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #141720;
+    }
+  </style>
+</head>
+
+<body>
+  <script type="module">
+    import { Engine, Box, Sphere, Plane, OrbitControls } from '../src/index.ts';
+
+    try {
+      const app = await Engine.create({ preset: 'studio' });
+      app.add(Plane({ id: 'floor', size: [8, 1, 8], material: 'matte-plastic' }));
+      app.add(Box({ id: 'table', size: [2.4, 0.12, 1.2], position: [0, 0.75, 0], material: 'oak-wood' }));
+      const orb = app.add(Sphere({ id: 'orb', radius: 0.25, on: 'table', align: 'center', color: '#00aaff', metalness: 0.8, roughness: 0.15 }));
+      app.use(OrbitControls());
+      app.camera.fitAll({ padding: 1.3 });
+      app.onTick((_dt, elapsed) => {
+        orb.position[1] = 1.06 + Math.sin(elapsed * 2.5) * 0.12;
+      });
+    } catch (err) {
+      const msg = document.createElement('pre');
+      msg.style.cssText = 'position:fixed;top:12px;left:12px;padding:10px 14px;background:rgba(15,23,42,0.9);color:#f87171;border-radius:6px;font:13px/1.4 monospace;z-index:10;';
+      msg.textContent = err instanceof Error ? err.message : String(err);
+      document.body.appendChild(msg);
+    }
+  </script>
+</body>
+
 </html>

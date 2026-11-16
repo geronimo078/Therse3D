@@ -9,8 +9,8 @@ import {
   type SceneSyncResult,
   type SceneSyncState,
 } from './SceneSync';
-import { GPUDeviceContext } from '../gpu/Device';
-import { Renderer, type BloomConfig, type VolumetricConfig } from '../gpu/Renderer';
+import { GPUDeviceContext, type GPUDeviceInitOptions, type QualityMode } from '../gpu/Device';
+import { Renderer, type BloomConfig, type RendererOptions, type VolumetricConfig } from '../gpu/Renderer';
 import {
   Inspector,
   pickFromScreen,
@@ -38,6 +38,8 @@ export type EnginePreset = 'studio' | 'outdoor' | 'dark-ui' | 'cad-blueprint' | 
 export interface EngineOptions {
   canvas?: HTMLCanvasElement | string;
   preset?: EnginePreset;
+  quality?: QualityMode;
+  maxDpr?: number;
   autoResize?: boolean;
   antialias?: boolean;
   maxEntities?: number;
@@ -119,19 +121,27 @@ export class Engine {
     }
 
     const canvas = Engine.resolveCanvas(options.canvas);
-    const gpuInitOptions: { autoResize?: boolean; onDeviceLost?: (info: GPUDeviceLostInfo) => void } = {
+    const gpuInitOptions: GPUDeviceInitOptions = {
       autoResize: options.autoResize ?? true,
+      ...(options.quality !== undefined ? { quality: options.quality } : {}),
+      ...(options.maxDpr !== undefined ? { maxDpr: options.maxDpr } : {}),
+      ...(options.onDeviceLost !== undefined ? { onDeviceLost: options.onDeviceLost } : {}),
     };
-    if (options.onDeviceLost !== undefined) {
-      gpuInitOptions.onDeviceLost = options.onDeviceLost;
-    }
     const gpu = await GPUDeviceContext.init(canvas, gpuInitOptions);
     const store = new WorldStore(options.maxEntities);
     const preset = options.preset ?? 'studio';
-    const renderer = new Renderer(gpu, store, preset);
+    const rendererOptions: RendererOptions = {
+      ...(options.quality !== undefined ? { quality: options.quality } : {}),
+      ...(options.antialias !== undefined ? { antialias: options.antialias } : {}),
+    };
+    const renderer = new Renderer(gpu, store, preset, rendererOptions);
     const engine = new Engine(gpu, renderer, store, preset);
     engine.start();
     return engine;
+  }
+
+  get isLowSpec(): boolean {
+    return this.renderer.isLowSpec;
   }
 
   static getPromptContext(app?: Engine): string {

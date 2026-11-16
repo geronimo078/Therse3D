@@ -20,17 +20,46 @@
         position: fixed;
         top: 14px;
         left: 14px;
-        width: 330px;
+        width: 340px;
         padding: 14px;
-        background: rgba(8, 13, 26, 0.85);
-        backdrop-filter: blur(10px);
+        background: rgba(8, 13, 26, 0.86);
+        backdrop-filter: blur(12px);
         border: 1px solid rgba(56, 189, 248, 0.28);
-        border-radius: 10px;
+        border-radius: 12px;
         font-size: 13px;
+        z-index: 10;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
       }
-      h1 { margin: 0 0 4px; font-size: 15px; color: #fbbf24; }
-      p { margin: 0 0 10px; font-size: 12px; color: #94a3b8; }
+      .hud-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+      #hud.collapsed .hud-body { display: none; }
+      h1 { margin: 0; font-size: 15px; color: #fbbf24; }
+      p { margin: 0 0 10px; font-size: 12px; color: #94a3b8; line-height: 1.4; }
       .row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+      .slider-row {
+        display: grid;
+        grid-template-columns: 98px 1fr 38px;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        font-size: 11px;
+        color: #cbd5e1;
+      }
+      .slider-row input[type="range"] {
+        width: 100%;
+        accent-color: #38bdf8;
+        cursor: pointer;
+      }
+      .slider-val {
+        text-align: right;
+        font-family: monospace;
+        color: #7dd3fc;
+      }
       button {
         cursor: pointer;
         border: 1px solid rgba(148, 163, 184, 0.3);
@@ -46,13 +75,80 @@
         background: rgba(14, 116, 144, 0.45);
         color: #e0f2fe;
       }
-      #hud { z-index: 10; }
       #pickInfo {
         padding: 8px;
         border-radius: 6px;
         background: rgba(2, 6, 23, 0.72);
         font: 11px/1.4 monospace;
         color: #a5f3fc;
+        white-space: pre-line;
+      }
+      #snapshotPreview {
+        position: fixed;
+        right: 14px;
+        bottom: 14px;
+        width: 300px;
+        padding: 10px;
+        background: rgba(8, 13, 26, 0.9);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(56, 189, 248, 0.35);
+        border-radius: 10px;
+        z-index: 10;
+        display: none;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+      }
+      #snapshotPreview header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 6px;
+        font-size: 11px;
+        color: #7dd3fc;
+        font-weight: 600;
+      }
+      #snapshotPreview img {
+        width: 100%;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        display: block;
+      }
+      #snapshotMeta {
+        margin-top: 6px;
+        font: 10px/1.35 monospace;
+        color: #94a3b8;
+      }
+      #loadingOverlay {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        background: radial-gradient(circle at center, #0b1326 0%, #03060f 100%);
+        color: #e2e8f0;
+        transition: opacity 0.35s ease;
+      }
+      #loadingOverlay.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .spinner {
+        width: 38px;
+        height: 38px;
+        border: 3px solid rgba(56, 189, 248, 0.22);
+        border-top-color: #38bdf8;
+        border-radius: 50%;
+        animation: spin 0.85s linear infinite;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+      #loadingText {
+        font-size: 13px;
+        color: #94a3b8;
+        letter-spacing: 0.02em;
       }
       #labelsLayer {
         position: fixed;
@@ -88,20 +184,48 @@
   </head>
   <body>
     <canvas id="canvas"></canvas>
+    <div id="loadingOverlay">
+      <div class="spinner"></div>
+      <div id="loadingText">Loading WebGPU &amp; Planetary Scene...</div>
+    </div>
     <div id="labelsLayer"></div>
     <div id="hud">
-      <h1>Living Earth &amp; Atmosphere</h1>
-      <p>Cone pine forests &amp; peaks, volumetric clouds &amp; god rays, Bloom glow, 3D-projected labels &amp; live shadows.</p>
-      <div class="row">
-        <button id="btnPause">Pause</button>
-        <button id="btnSunOrbit">Sun Orbit: ON</button>
-        <button id="btnBloom" class="toggle-on">Bloom: ON</button>
-        <button id="btnLabels" class="toggle-on">Labels: ON</button>
-        <button id="btnPlant">+ Plant Trees</button>
-        <button id="btnFocusMoon">Focus Moon</button>
-        <button id="btnFit">Focus Earth</button>
+      <div class="hud-header">
+        <h1>Living Earth &amp; Atmosphere</h1>
+        <button id="btnCollapse" title="Toggle HUD (H)">−</button>
       </div>
-      <div id="pickInfo">Click any continent, tree, cloud, plane, moon, or sun...</div>
+      <div class="hud-body">
+        <p>Procedural .glb terrain &amp; forests, Rayleigh atmosphere, volumetric clouds, Bloom, 3D labels &amp; AI inspection.</p>
+        <div class="row">
+          <button id="btnPause">Pause</button>
+          <button id="btnSunOrbit" class="toggle-on">Sun Orbit: ON</button>
+          <button id="btnBloom" class="toggle-on">Bloom: ON</button>
+          <button id="btnLabels" class="toggle-on">Labels: ON</button>
+          <button id="btnPlant">+ Plant Trees</button>
+          <button id="btnFocusMoon">Focus Moon</button>
+          <button id="btnFit">Focus Earth</button>
+          <button id="btnSnapshot">AI Snapshot</button>
+        </div>
+        <div class="slider-row">
+          <span>Time Speed</span>
+          <input id="sliderSpeed" type="range" min="0" max="3" step="0.1" value="1" />
+          <span id="valSpeed" class="slider-val">1.0x</span>
+        </div>
+        <div class="slider-row">
+          <span>Cloud Cover</span>
+          <input id="sliderClouds" type="range" min="0" max="0.85" step="0.02" value="0.56" />
+          <span id="valClouds" class="slider-val">56%</span>
+        </div>
+        <div id="pickInfo">Click any continent, tree, moon, ISS, or sun... (Space: Pause, L: Labels, H: HUD)</div>
+      </div>
+    </div>
+    <div id="snapshotPreview">
+      <header>
+        <span>AI Annotated Snapshot</span>
+        <button id="btnCloseSnap">×</button>
+      </header>
+      <img id="snapshotImg" alt="therse3d AI annotated snapshot" />
+      <div id="snapshotMeta"></div>
     </div>
 
     <script type="module">
@@ -121,7 +245,11 @@
       } from '../src/index.ts';
 
       const pickInfo = document.getElementById('pickInfo');
+      const loadingOverlay = document.getElementById('loadingOverlay');
+      const loadingText = document.getElementById('loadingText');
       const labelsLayer = document.getElementById('labelsLayer');
+      const hud = document.getElementById('hud');
+      const btnCollapse = document.getElementById('btnCollapse');
       const btnPause = document.getElementById('btnPause');
       const btnSunOrbit = document.getElementById('btnSunOrbit');
       const btnBloom = document.getElementById('btnBloom');
@@ -129,6 +257,15 @@
       const btnPlant = document.getElementById('btnPlant');
       const btnFocusMoon = document.getElementById('btnFocusMoon');
       const btnFit = document.getElementById('btnFit');
+      const btnSnapshot = document.getElementById('btnSnapshot');
+      const sliderSpeed = document.getElementById('sliderSpeed');
+      const valSpeed = document.getElementById('valSpeed');
+      const sliderClouds = document.getElementById('sliderClouds');
+      const valClouds = document.getElementById('valClouds');
+      const snapshotPreview = document.getElementById('snapshotPreview');
+      const snapshotImg = document.getElementById('snapshotImg');
+      const snapshotMeta = document.getElementById('snapshotMeta');
+      const btnCloseSnap = document.getElementById('btnCloseSnap');
 
       function alignUpToNormal(handle, nx, ny, nz, yaw = 0) {
         const dot = Math.max(-1, Math.min(1, ny));
@@ -504,9 +641,11 @@
 
         // Detailed 3D Tree Assets (.glb: pine in temperate/boreal, oak in tropical/subtropical)
         let treeCounter = 0;
+        const plantedNormals = [];
         function plantTree(lat, lon) {
           const idx = treeCounter++;
           const [nx, ny, nz] = sphericalNormal(lat, lon);
+          plantedNormals.push([nx, ny, nz]);
           const elev = Math.max(0.012, getPlanetElevation(nx, ny, nz));
           const isPine = Math.abs(lat) >= 28;
           const baseR = R + elev - 0.012;
@@ -584,7 +723,7 @@
         }
 
         // Aurora Borealis & Aurora Australis (translucent glowing polar rings)
-        app.add(Torus({
+        const auroraNorth = app.add(Torus({
           id: 'aurora-north',
           parent: 'earth',
           position: [0, R * 0.94, 0],
@@ -592,7 +731,7 @@
           color: [0.16, 0.96, 0.62, 0.24],
           emissive: 2.0,
         }));
-        app.add(Torus({
+        const auroraSouth = app.add(Torus({
           id: 'aurora-south',
           parent: 'earth',
           position: [0, -R * 0.94, 0],
@@ -727,7 +866,7 @@
         app.add(Cylinder({ id: 'iss-hab', parent: 'iss', size: [0.045, 0.18, 0.045], color: '#e2e8f0', metalness: 0.6, roughness: 0.35 }));
         app.add(Box({ id: 'iss-solar-1', parent: 'iss', position: [-0.15, 0, 0], size: [0.06, 0.01, 0.24], color: '#1e3a8a', metalness: 0.85, roughness: 0.2 }));
         app.add(Box({ id: 'iss-solar-2', parent: 'iss', position: [0.15, 0, 0], size: [0.06, 0.01, 0.24], color: '#1e3a8a', metalness: 0.85, roughness: 0.2 }));
-        app.add(Sphere({ id: 'iss-beacon', parent: 'iss', position: [0, 0.10, 0], radius: 0.02, color: '#38bdf8', emissive: 3.0 }));
+        const issBeacon = app.add(Sphere({ id: 'iss-beacon', parent: 'iss', position: [0, 0.10, 0], radius: 0.02, color: '#38bdf8', emissive: 3.0 }));
 
         app.use(OrbitControls({ distance: 7.0, target: [0, 0, 0] }));
         app.setBloom({ enabled: true, threshold: 0.80, intensity: 0.65, radius: 1.7 });
@@ -736,6 +875,7 @@
         let sunOrbit = true;
         let bloomOn = true;
         let labelsOn = true;
+        let timeScale = 1.0;
         let simTime = 0;
 
         // 3D-projected HTML labels using app.project()
@@ -757,13 +897,16 @@
           return { ...item, el };
         });
 
-        btnPause.addEventListener('click', () => {
+        const togglePause = () => {
           paused = !paused;
           btnPause.textContent = paused ? 'Resume' : 'Pause';
-        });
+          btnPause.classList.toggle('toggle-on', paused);
+        };
+        btnPause.addEventListener('click', togglePause);
         btnSunOrbit.addEventListener('click', () => {
           sunOrbit = !sunOrbit;
           btnSunOrbit.textContent = `Sun Orbit: ${sunOrbit ? 'ON' : 'OFF'}`;
+          btnSunOrbit.classList.toggle('toggle-on', sunOrbit);
         });
         btnBloom.addEventListener('click', () => {
           bloomOn = !bloomOn;
@@ -778,24 +921,102 @@
           btnLabels.classList.toggle('toggle-on', labelsOn);
         };
         btnLabels.addEventListener('click', toggleLabels);
+        const toggleCollapse = () => {
+          const isCollapsed = hud.classList.toggle('collapsed');
+          btnCollapse.textContent = isCollapsed ? '+' : '−';
+        };
+        btnCollapse.addEventListener('click', toggleCollapse);
+
+        sliderSpeed.addEventListener('input', () => {
+          timeScale = Number(sliderSpeed.value);
+          valSpeed.textContent = `${timeScale.toFixed(1)}x`;
+        });
+        sliderClouds.addEventListener('input', () => {
+          const cov = Number(sliderClouds.value);
+          valClouds.textContent = `${Math.round(cov * 100)}%`;
+          app.setVolumetric({ cloudCoverage: cov });
+        });
+
+        btnSnapshot.addEventListener('click', async () => {
+          btnSnapshot.textContent = 'Capturing...';
+          try {
+            const snap = await app.snapshot({ layers: ['annotated'], resolution: [640, 400] });
+            const desc = app.describe();
+            if (snap.annotatedDataUrl) {
+              snapshotImg.src = snap.annotatedDataUrl;
+              snapshotMeta.textContent = `Entities: ${desc.entityCount} | Warnings: ${desc.warnings.length}`;
+              snapshotPreview.style.display = 'block';
+            }
+          } finally {
+            btnSnapshot.textContent = 'AI Snapshot';
+          }
+        });
+        btnCloseSnap.addEventListener('click', () => {
+          snapshotPreview.style.display = 'none';
+        });
+
         window.addEventListener('keydown', (e) => {
-          if (e.key === 'l' || e.key === 'L') toggleLabels();
+          if (e.code === 'Space') {
+            e.preventDefault();
+            togglePause();
+          } else if (e.key === 'l' || e.key === 'L') {
+            toggleLabels();
+          } else if (e.key === 'h' || e.key === 'H') {
+            toggleCollapse();
+          }
         });
         btnPlant.addEventListener('click', () => {
+          let planted = 0;
           for (let k = 0; k < 5; k++) {
-            const [lat, lon] = landForestSpots[(treeCounter + k) % landForestSpots.length];
-            plantTree(lat, lon);
+            let bestLat = null;
+            let bestLon = null;
+            for (let attempt = 0; attempt < 250; attempt++) {
+              const u = Math.random();
+              const v = Math.random();
+              const ny = (u * 2 - 1) * 0.80;
+              const rad = Math.sqrt(Math.max(0, 1 - ny * ny));
+              const theta = v * Math.PI * 2;
+              const nx = Math.cos(theta) * rad;
+              const nz = Math.sin(theta) * rad;
+              const elev = getPlanetElevation(nx, ny, nz);
+              if (elev <= 0.012 || elev >= 0.085) continue;
+
+              let tooClose = false;
+              for (let p = 0; p < plantedNormals.length; p++) {
+                const pn = plantedNormals[p];
+                if (nx * pn[0] + ny * pn[1] + nz * pn[2] > 0.9965) {
+                  tooClose = true;
+                  break;
+                }
+              }
+              if (!tooClose) {
+                bestLat = (Math.asin(ny) * 180) / Math.PI;
+                bestLon = (Math.atan2(nz, nx) * 180) / Math.PI;
+                break;
+              }
+            }
+            if (bestLat !== null && bestLon !== null) {
+              plantTree(bestLat, bestLon);
+              planted++;
+            }
           }
-          pickInfo.textContent = `Planted 5 more 3D trees! Total trees: ${treeCounter}`;
+          pickInfo.textContent =
+            planted > 0
+              ? `Planted ${planted} new 3D trees on free land! Total trees: ${treeCounter}`
+              : `No free land spots found (Total trees: ${treeCounter})`;
         });
         btnFocusMoon.addEventListener('click', () => app.focusCamera({ target: 'moon', angle: 'front-elevated', distance: 2.2 }));
         btnFit.addEventListener('click', () => app.focusCamera({ target: 'earth', angle: 'front-elevated', distance: 7.0 }));
 
         app.onTick((dt) => {
           if (!paused) {
-            simTime += dt;
+            simTime += dt * timeScale;
 
             quat.fromEuler(earth.rotation, 0.18, simTime * 0.20, 0);
+            quat.fromEuler(auroraNorth.rotation, 0, simTime * 0.45, 0);
+            quat.fromEuler(auroraSouth.rotation, 0, -simTime * 0.38, 0);
+            const auroraPulse = 1.32 + Math.sin(simTime * 2.2) * 0.05;
+            auroraNorth.setScale(auroraPulse, 0.22 + Math.cos(simTime * 1.8) * 0.03, auroraPulse);
 
             const mAngle = simTime * 0.35;
             moon.setPosition(
@@ -803,6 +1024,7 @@
               0.35 * Math.sin(mAngle),
               Math.sin(mAngle) * moonOrbitR,
             );
+            quat.fromEuler(moon.rotation, 0, -mAngle, 0);
 
             const sAngle = -simTime * 0.95;
             sat.setPosition(
@@ -819,6 +1041,7 @@
               Math.sin(issAngle) * 2.50,
             );
             quat.fromEuler(iss.rotation, 0.35, -issAngle, 0.2);
+            issBeacon.visible = Math.sin(simTime * 6.0) > 0;
 
             quat.fromEuler(sunMesh.rotation, 0.12, simTime * 0.08, 0);
             if (sunOrbit) {
@@ -854,8 +1077,12 @@
             pickInfo.textContent = 'Space (no entity hit)';
           }
         });
+
+        loadingOverlay.classList.add('hidden');
       } catch (err) {
-        pickInfo.textContent = err instanceof Error ? err.message : String(err);
+        const msg = err instanceof Error ? err.message : String(err);
+        loadingText.textContent = msg;
+        pickInfo.textContent = msg;
       }
     </script>
   </body>
