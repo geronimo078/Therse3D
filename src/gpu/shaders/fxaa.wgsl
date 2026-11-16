@@ -31,11 +31,11 @@ fn fs_fxaa(in: VsOut) -> @location(0) vec4<f32> {
   let dims = vec2<f32>(textureDimensions(srcTex));
   let texel = 1.0 / max(dims, vec2<f32>(1.0));
 
-  let rgbM = textureSample(srcTex, srcSampler, in.uv).rgba;
-  let rgbNW = textureSample(srcTex, srcSampler, in.uv + vec2<f32>(-1.0, -1.0) * texel).rgb;
-  let rgbNE = textureSample(srcTex, srcSampler, in.uv + vec2<f32>(1.0, -1.0) * texel).rgb;
-  let rgbSW = textureSample(srcTex, srcSampler, in.uv + vec2<f32>(-1.0, 1.0) * texel).rgb;
-  let rgbSE = textureSample(srcTex, srcSampler, in.uv + vec2<f32>(1.0, 1.0) * texel).rgb;
+  let rgbM = textureSampleLevel(srcTex, srcSampler, in.uv, 0.0).rgba;
+  let rgbNW = textureSampleLevel(srcTex, srcSampler, in.uv + vec2<f32>(-1.0, -1.0) * texel, 0.0).rgb;
+  let rgbNE = textureSampleLevel(srcTex, srcSampler, in.uv + vec2<f32>(1.0, -1.0) * texel, 0.0).rgb;
+  let rgbSW = textureSampleLevel(srcTex, srcSampler, in.uv + vec2<f32>(-1.0, 1.0) * texel, 0.0).rgb;
+  let rgbSE = textureSampleLevel(srcTex, srcSampler, in.uv + vec2<f32>(1.0, 1.0) * texel, 0.0).rgb;
 
   let lumaM = luma(rgbM.rgb);
   let lumaNW = luma(rgbNW);
@@ -60,12 +60,12 @@ fn fs_fxaa(in: VsOut) -> @location(0) vec4<f32> {
   dir = clamp(dir * rcpDirMin, vec2<f32>(-8.0), vec2<f32>(8.0)) * texel;
 
   let rgbA = 0.5 * (
-    textureSample(srcTex, srcSampler, in.uv + dir * (1.0 / 3.0 - 0.5)).rgb +
-    textureSample(srcTex, srcSampler, in.uv + dir * (2.0 / 3.0 - 0.5)).rgb
+    textureSampleLevel(srcTex, srcSampler, in.uv + dir * (1.0 / 3.0 - 0.5), 0.0).rgb +
+    textureSampleLevel(srcTex, srcSampler, in.uv + dir * (2.0 / 3.0 - 0.5), 0.0).rgb
   );
   let rgbB = rgbA * 0.5 + 0.25 * (
-    textureSample(srcTex, srcSampler, in.uv + dir * -0.5).rgb +
-    textureSample(srcTex, srcSampler, in.uv + dir * 0.5).rgb
+    textureSampleLevel(srcTex, srcSampler, in.uv + dir * -0.5, 0.0).rgb +
+    textureSampleLevel(srcTex, srcSampler, in.uv + dir * 0.5, 0.0).rgb
   );
   let lumaB = luma(rgbB);
   if (lumaB < lumaMin || lumaB > lumaMax) {
