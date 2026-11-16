@@ -100,4 +100,26 @@ export {
   type McpToolRequest,
   type CameraFocusArgs,
 } from './ai/McpBridge';
+export {
+  TileMeshPlugin,
+  TileMeshManager,
+  DEFAULT_TILE_LOD_LEVELS,
+  tileCoordToGeoBounds,
+  geoToWorldPoint,
+  buildTileMeshData,
+  type TileProjectionMode,
+  type SurfaceType,
+  type SurfaceSample,
+  type TileDeformOptions,
+  type TileDeformResult,
+  type TilePickHit,
+  type TileCoord,
+  type GeoBounds,
+  type TileLodLevel,
+  type TileHeightSampler,
+  type TileInput,
+  type TileRecord,
+  type TileMeshPluginOptions,
+  type BuildTileMeshOptions,
+} from './plugins/TileMeshPlugin';
 

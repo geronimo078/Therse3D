@@ -193,11 +193,18 @@
         <span>Send VLM Snapshot (<code>app.snapshot()</code>) to vision-capable model</span>
       </div>
 
-      <label for="prompt">Instruction / Mood for your AI</label>
-      <textarea id="prompt">Create an expressive futuristic AI avatar with glowing cyan eyes, eyebrows, a speech bubble saying "Ready!", and look slightly to the right.</textarea>
+      <label for="prompt">Modeling Brief for your Local AI (Blender-style Polygon Mesh)</label>
+      <textarea id="prompt">Model a stylized 3D humanoid/cyber-creature avatar mesh step by step using polygon extrusion, subdivision smoothing, and symmetric sculpting (torso, shoulders, neck, sculpted head with brow/nose/chin/horns).</textarea>
 
       <div class="row">
-        <button id="btnAskAi" class="primary">Ask Local AI</button>
+        <button id="btnAskAi" class="primary">Model Step (+1)</button>
+        <button id="btnAutoBuild" class="primary">Auto-Model (24 Steps)</button>
+        <button id="btnContinuous" class="primary">Continuous Improve</button>
+        <button id="btnStopAuto" disabled>Stop</button>
+        <button id="btnExportGlb">Export .glb</button>
+        <button id="btnDownloadLog">Download Log</button>
+        <button id="btnClearStage">Blank Mesh</button>
+        <button id="btnUndo">Undo</button>
         <button id="btnSnapshot">Snapshot</button>
       </div>
 
@@ -210,6 +217,10 @@
       </div>
 
       <div id="log">Initializing WebGPU Avatar Studio...</div>
+      <details style="margin-top:8px;font-size:11px;color:#94a3b8;">
+        <summary style="cursor:pointer;">Last AI JSON Response</summary>
+        <pre id="rawJson" style="margin:6px 0 0;padding:8px;border-radius:6px;background:rgba(2,6,23,0.8);max-height:160px;overflow:auto;white-space:pre-wrap;color:#cbd5e1;"></pre>
+      </details>
     </div>
 
     <div id="snapshotBox">
@@ -217,270 +228,6 @@
       <img id="snapshotImg" alt="AI Snapshot" />
     </div>
 
-    <script type="module">
-      import {
-        Engine,
-        OrbitControls,
-      } from '../../src/index.ts';
-
-      const providerEl = document.getElementById('provider');
-      const endpointEl = document.getElementById('endpoint');
-      const modelEl = document.getElementById('model');
-      const apiKeyEl = document.getElementById('apiKey');
-      const glbFileEl = document.getElementById('glbFile');
-      const useVisionEl = document.getElementById('useVision');
-      const promptEl = document.getElementById('prompt');
-      const btnAskAi = document.getElementById('btnAskAi');
-      const btnSnapshot = document.getElementById('btnSnapshot');
-      const logEl = document.getElementById('log');
-      const snapshotBox = document.getElementById('snapshotBox');
-      const snapshotImg = document.getElementById('snapshotImg');
-
-      function appendLog(msg) {
-        logEl.textContent = `${msg}\n${logEl.textContent}`.slice(0, 2400);
-      }
-
-      providerEl.addEventListener('change', () => {
-        if (providerEl.value === 'ollama') {
-          endpointEl.value = 'http://localhost:11434/v1/chat/completions';
-          if (modelEl.value === 'local-model') modelEl.value = 'qwen2.5:7b';
-        } else if (providerEl.value === 'lmstudio') {
-          endpointEl.value = 'http://localhost:1234/v1/chat/completions';
-          modelEl.value = 'local-model';
-        }
-      });
-
-      const app = await Engine.create('#canvas', { preset: 'dark-ui' });
-      app.use(OrbitControls({ distance: 3.4, target: [0, 1.15, 0] }));
-
-      let customGlbUrl = null;
-
-      // Initial modular AI Avatar scene (works immediately without external .glb)
-      const initialScene = {
-        preset: 'dark-ui',
-        transition: 0.4,
-        camera: { target: [0, 1.15, 0], angle: 'front', distance: 3.2 },
-        entities: [
-          { id: 'stage', type: 'plane', size: [8, 1, 8], position: [0, 0, 0], material: 'studio-grid' },
-          { id: 'key_spot', type: 'light', kind: 'spot', position: [1.8, 3.0, 2.4], rotation: [-0.45, 0.55, 0], color: '#e0f2fe', intensity: 3.5, spotAngle: 35 },
-          { id: 'rim_light', type: 'light', kind: 'point', position: [-2.0, 2.2, -1.8], color: '#38bdf8', intensity: 2.2 },
-          { id: 'avatar_root', type: 'group', position: [0, 1.15, 0] },
-          { id: 'head', type: 'sphere', parent: 'avatar_root', radius: 0.45, scale: [0.88, 1.04, 0.92], material: 'matte-ceramic', color: '#e2e8f0' },
-          { id: 'visor', type: 'box', parent: 'head', position: [0, 0.06, 0.34], size: [0.56, 0.22, 0.16], material: 'tinted-glass', color: [0.06, 0.12, 0.24, 0.85] },
-          { id: 'eye_l', type: 'sphere', parent: 'head', position: [-0.14, 0.06, 0.41], radius: 0.055, color: '#38bdf8', emissive: 2.6 },
-          { id: 'eye_r', type: 'sphere', parent: 'head', position: [0.14, 0.06, 0.41], radius: 0.055, color: '#38bdf8', emissive: 2.6 },
-          { id: 'brow_l', type: 'box', parent: 'head', position: [-0.14, 0.17, 0.41], size: [0.14, 0.025, 0.04], color: '#bae6fd', emissive: 1.2 },
-          { id: 'brow_r', type: 'box', parent: 'head', position: [0.14, 0.17, 0.41], size: [0.14, 0.025, 0.04], color: '#bae6fd', emissive: 1.2 },
-          { id: 'mouth', type: 'box', parent: 'head', position: [0, -0.16, 0.39], size: [0.18, 0.03, 0.04], color: '#38bdf8', emissive: 1.5 },
-          { id: 'speech_bubble', type: 'sprite', parent: 'avatar_root', position: [0.75, 0.65, 0], scale: [1.1, 0.28, 1], text: 'Online & Ready' },
-        ],
-      };
-
-      const initReport = app.sync(initialScene);
-      appendLog(`Studio ready (Low-Spec: ${app.isLowSpec}). Entities: ${initReport.applied}`);
-
-      // Subtle idle breathing animation
-      app.onTick((_dt, elapsed) => {
-        const root = app.get('avatar_root');
-        if (root) {
-          root.position[1] = 1.15 + Math.sin(elapsed * 1.8) * 0.025;
-        }
-      });
-
-      // Optional user .glb avatar upload (with morphTargets / skeletal bones)
-      glbFileEl.addEventListener('change', () => {
-        const file = glbFileEl.files?.[0];
-        if (!file) return;
-        if (customGlbUrl) URL.revokeObjectURL(customGlbUrl);
-        customGlbUrl = URL.createObjectURL(file);
-        const res = app.sync({
-          preset: 'dark-ui',
-          transition: 0.35,
-          camera: { target: 'glb_avatar', angle: 'front', distance: 2.5 },
-          entities: [
-            { id: 'stage', type: 'plane', size: [8, 1, 8], position: [0, 0, 0], material: 'studio-grid' },
-            { id: 'key_spot', type: 'light', kind: 'spot', position: [1.5, 2.8, 2.2], rotation: [-0.45, 0.5, 0], color: '#fff7ed', intensity: 3.4, spotAngle: 35 },
-            { id: 'glb_avatar', type: 'model', url: customGlbUrl, position: [0, 1.1, 0] },
-            { id: 'speech_bubble', type: 'sprite', position: [0.8, 1.85, 0], scale: [1.1, 0.28, 1], text: file.name },
-          ],
-        });
-        appendLog(`Loaded .glb "${file.name}". Warnings: ${res.warnings.length}`);
-        setTimeout(() => {
-          const desc = app.describe();
-          const avatarDesc = desc.entities.find((e) => e.id === 'glb_avatar');
-          if (avatarDesc?.morphTargets?.length) {
-            appendLog(`Detected morphTargets: ${avatarDesc.morphTargets.join(', ')}`);
-          }
-          if (avatarDesc?.bones?.length) {
-            appendLog(`Detected bones: ${avatarDesc.bones.join(', ')}`);
-          }
-        }, 600);
-      });
-
-      // Quick local expression presets
-      const EXPRESSION_PRESETS = {
-        neutral: {
-          headRot: [0, 0, 0],
-          browL: [0, 0, 0],
-          browR: [0, 0, 0],
-          mouthScale: [0.18, 0.03, 0.04],
-          eyeColor: '#38bdf8',
-          text: 'Online & Ready',
-          morph: { smile: 0, browInnerUp: 0, jawOpen: 0 },
-        },
-        happy: {
-          headRot: [-0.06, 0.12, 0.05],
-          browL: [0, 0, 0.15],
-          browR: [0, 0, -0.15],
-          mouthScale: [0.26, 0.06, 0.04],
-          eyeColor: '#34d399',
-          text: 'Happy to help!',
-          morph: { smile: 0.9, browInnerUp: 0.2, jawOpen: 0.15 },
-        },
-        curious: {
-          headRot: [0.05, -0.25, -0.14],
-          browL: [0, 0, 0.28],
-          browR: [0, 0, 0.08],
-          mouthScale: [0.10, 0.05, 0.04],
-          eyeColor: '#fbbf24',
-          text: 'Interesting...',
-          morph: { smile: 0.15, browInnerUp: 0.7, jawOpen: 0.1 },
-        },
-        thinking: {
-          headRot: [-0.14, 0.22, 0.08],
-          browL: [0, 0, -0.22],
-          browR: [0, 0, 0.22],
-          mouthScale: [0.14, 0.025, 0.04],
-          eyeColor: '#a78bfa',
-          text: 'Processing...',
-          morph: { smile: 0, browInnerUp: 0.35, jawOpen: 0 },
-        },
-      };
-
-      document.querySelectorAll('.expr-btn').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const p = EXPRESSION_PRESETS[btn.dataset.expr];
-          if (!p) return;
-          if (customGlbUrl) {
-            app.patch({
-              transition: 0.35,
-              upsert: [
-                { id: 'glb_avatar', type: 'model', rotation: p.headRot, morphWeights: p.morph },
-                { id: 'speech_bubble', type: 'sprite', text: p.text },
-              ],
-            });
-          } else {
-            app.patch({
-              transition: 0.35,
-              upsert: [
-                { id: 'head', type: 'sphere', rotation: p.headRot },
-                { id: 'brow_l', type: 'box', rotation: p.browL, color: p.eyeColor },
-                { id: 'brow_r', type: 'box', rotation: p.browR, color: p.eyeColor },
-                { id: 'eye_l', type: 'sphere', color: p.eyeColor },
-                { id: 'eye_r', type: 'sphere', color: p.eyeColor },
-                { id: 'mouth', type: 'box', size: p.mouthScale, color: p.eyeColor },
-                { id: 'speech_bubble', type: 'sprite', text: p.text },
-              ],
-            });
-          }
-          appendLog(`Applied expression: ${btn.dataset.expr}`);
-        });
-      });
-
-      btnSnapshot.addEventListener('click', async () => {
-        const snap = await app.snapshot({ layers: ['annotated'], resolution: [512, 384] });
-        if (snap.annotatedDataUrl) {
-          snapshotImg.src = snap.annotatedDataUrl;
-          snapshotBox.style.display = 'block';
-        }
-      });
-
-      function extractJsonObject(text) {
-        const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-        const candidate = (fenced ? fenced[1] : text).trim();
-        const start = candidate.indexOf('{');
-        const end = candidate.lastIndexOf('}');
-        if (start < 0 || end <= start) {
-          throw new Error('Model response did not contain a valid JSON object.');
-        }
-        return JSON.parse(candidate.slice(start, end + 1));
-      }
-
-      btnAskAi.addEventListener('click', async () => {
-        const endpoint = endpointEl.value.trim();
-        const model = modelEl.value.trim();
-        const userInstruction = promptEl.value.trim();
-        if (!endpoint || !model || !userInstruction) {
-          appendLog('Please fill in Endpoint URL, Model Name, and Instruction.');
-          return;
-        }
-
-        btnAskAi.disabled = true;
-        btnAskAi.textContent = 'Thinking...';
-        try {
-          const sceneDesc = app.describe();
-          const systemPrompt = [
-            Engine.getPromptContext(app),
-            'You are controlling a 3D AI Avatar in therse3d.',
-            'Respond ONLY with a single JSON object matching ScenePatchState ({ "transition": 0.4, "upsert": [...] }) or SceneSyncState ({ "transition": 0.4, "entities": [...] }).',
-            'If morphTargets or bones are listed in the scene description, use morphWeights or boneRotations on the model entity.',
-            `Current scene description:\n${JSON.stringify(sceneDesc)}`,
-          ].join('\n\n');
-
-          const userContent = [{ type: 'text', text: userInstruction }];
-          if (useVisionEl.checked) {
-            const snap = await app.snapshot({ layers: ['annotated'], resolution: [512, 384] });
-            if (snap.annotatedDataUrl) {
-              snapshotImg.src = snap.annotatedDataUrl;
-              snapshotBox.style.display = 'block';
-              userContent.push({ type: 'image_url', image_url: { url: snap.annotatedDataUrl } });
-            }
-          }
-
-          const headers = { 'Content-Type': 'application/json' };
-          if (apiKeyEl.value.trim()) {
-            headers['Authorization'] = `Bearer ${apiKeyEl.value.trim()}`;
-          }
-
-          const resp = await fetch(endpoint, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-              model,
-              temperature: 0.3,
-              messages: [
-                { role: 'system', content: systemPrompt },
-                {
-                  role: 'user',
-                  content: userContent.length === 1 ? userInstruction : userContent,
-                },
-              ],
-            }),
-          });
-
-          if (!resp.ok) {
-            throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
-          }
-
-          const data = await resp.json();
-          const rawReply = data?.choices?.[0]?.message?.content ?? '';
-          const parsed = extractJsonObject(rawReply);
-
-          const report = Array.isArray(parsed.upsert)
-            ? app.patch(parsed)
-            : app.sync(parsed);
-
-          appendLog(
-            `AI applied ${report.applied} changes (added=${report.added}, updated=${report.updated}).` +
-              (report.warnings.length ? `\nWarnings: ${report.warnings.join(' | ')}` : ''),
-          );
-        } catch (err) {
-          appendLog(`Error: ${err instanceof Error ? err.message : String(err)}`);
-        } finally {
-          btnAskAi.disabled = false;
-          btnAskAi.textContent = 'Ask Local AI';
-        }
-      });
-    </script>
+    <script type="module" src="./avatar.js"></script>
   </body>
 </html>

@@ -109,7 +109,8 @@ With `npm run dev` running, open:
 - `http://localhost:5173/examples/earth-globe.html` — Living Earth planet with 3D `.glb` terrain & tree assets, textured Moon, volumetric clouds & god rays, dynamic sun & 2048px shadows
 - `http://localhost:5173/examples/sky-rings/index.html` — Sky Rings arcade flight game with volumetric clouds, god rays, mouse/keyboard controls, chase camera & ring checkpoints
 - `http://localhost:5173/examples/smart-factory/index.html` — AI-Supervised Smart Factory with `McpBridge` tool pipeline, `app.patch()`, `app.pick()`, auto-healing `warnings[]` & VLM snapshots
-- `http://localhost:5173/examples/Avatar/index.html` — Local AI Avatar Studio (Ollama / LM Studio / OpenAI-compatible) with `app.describe()`, `app.snapshot()`, `Text` speech-bubble billboards, `SpotLight`, and optional `.glb` upload for `morphWeights` & `boneRotations`
+- `http://localhost:5173/examples/Avatar/index.html` — Local AI Avatar Studio (Ollama / LM Studio / OpenAI-compatible) with Blender-style iterative polygon modeling (`EditablePolyMesh`), 24-step & continuous modeling loops, `.glb` export, `app.describe()`, `app.snapshot()`, and optional `.glb` upload
+- `http://localhost:5173/examples/tile-mesh/index.html` — Optional `TileMeshPlugin` demo with closed spherical (`6×4`) & planar (`4×4`) georeferenced tiles, camera-distance LOD, `sampleSurface()`, live `deformRegion()` terrain sculpting & deterministic GPU buffer lifecycle
 
 ---
 
@@ -128,6 +129,7 @@ therse3d/
     ├── gpu/                # Device, Renderer, BufferManager & WGSL shaders
     ├── entities/           # EntityHandle, Primitives, Materials, GltfLoader
     ├── controls/           # Camera & OrbitControls
+    ├── plugins/            # Optional engine plugins (TileMeshPlugin)
     └── ai/                 # Inspector, Snapshot, Schema, McpBridge
 ```
 

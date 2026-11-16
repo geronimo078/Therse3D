@@ -681,6 +681,27 @@ export class Renderer {
     this.customMeshes.delete(meshId);
   }
 
+  updateMeshVertices(
+    meshId: number,
+    vertices: Float32Array,
+    vertexStart = 0,
+    vertexCount?: number,
+  ): boolean {
+    const mesh = this.customMeshes.get(meshId);
+    if (!mesh) return false;
+    const totalVerts = Math.floor(vertices.length / 8);
+    const start = Math.max(0, Math.min(totalVerts, Math.floor(vertexStart)));
+    const count =
+      vertexCount !== undefined
+        ? Math.max(0, Math.min(totalVerts - start, Math.floor(vertexCount)))
+        : totalVerts - start;
+    if (count === 0) return true;
+    const floatOffset = start * 8;
+    const floatCount = count * 8;
+    this.buffers.writeBuffer(mesh.vertexBuffer, vertices, floatOffset * 4, floatOffset, floatCount);
+    return true;
+  }
+
   registerTexture(
     source: ImageBitmap | HTMLCanvasElement | OffscreenCanvas | Uint8Array | Uint8ClampedArray,
     width?: number,

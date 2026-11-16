@@ -396,6 +396,36 @@ export class Engine {
     return this;
   }
 
+  registerMesh(data: GeometryMeshData, label = 'custom-mesh'): number {
+    return this.renderer.registerMesh(data, label);
+  }
+
+  unloadMesh(meshId: number): void {
+    this.renderer.unloadMesh(meshId);
+  }
+
+  updateMeshVertices(
+    meshId: number,
+    vertices: Float32Array,
+    vertexStart = 0,
+    vertexCount?: number,
+  ): boolean {
+    return this.renderer.updateMeshVertices(meshId, vertices, vertexStart, vertexCount);
+  }
+
+  setEntityMesh(target: string | number | EntityHandle, meshId: number): boolean {
+    const handle =
+      target instanceof EntityHandle
+        ? target
+        : typeof target === 'number'
+          ? this.entitiesById.get(target)
+          : this.entitiesByName.get(target);
+    if (!handle) return false;
+    this.store.meshIds[handle.id] = meshId;
+    this.store.markDirty(handle.id, DirtyFlag.Geometry);
+    return true;
+  }
+
   registerTexture(
     source: ImageBitmap | HTMLCanvasElement | OffscreenCanvas | Uint8Array | Uint8ClampedArray,
     width?: number,
