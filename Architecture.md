@@ -45,7 +45,8 @@ therse3d/
 │   │   ├── Renderer.ts       # Render pipeline, auto-instancing, Multiple Render Targets (MRT)
 │   │   ├── BufferManager.ts  # GPU storage buffers & deterministic memory disposal
 │   │   └── shaders/
-│   │       ├── pbr.wgsl      # Standard PBR shader + environment lighting + instancing
+│   │       ├── pbr.wgsl      # Standard PBR shader + procedural IBL + spotlights + sprite billboards
+│   │       ├── fxaa.wgsl     # Lightweight FXAA post-pass for Low-Spec (1x MSAA) mode
 │   │       ├── id_depth.wgsl # Multi-pass shader for object ID picking & depth maps
 │   │       └── splat.wgsl    # Compute sort & quad rendering for 3D Gaussian Splatting
 │   ├── entities/
@@ -251,5 +252,5 @@ All transform and material data live in contiguous `TypedArrays` to avoid CPU ca
       3. `therse_snapshot` → returns the `annotated` RGB image for multimodal VLM self-verification.
       4. `therse_camera_focus` → focuses the camera on an `entityId` or view (`'top'`, `'front'`, `'isometric'`).
   * **`GltfLoader.ts`:**
-    * Minimal `.glb` (Binary glTF 2.0) loader that loads meshes, PBR materials, and morph targets (`targets` `POSITION`/`NORMAL` deltas + `extras.targetNames`) directly into `WorldStore` & `BufferManager`, allowing expressive 3D assets and AI avatars via `{ type: 'model', url: 'avatar.glb', morphWeights: { smile: 0.8 } }` in `app.sync()` / `app.patch()`.
+    * Minimal `.glb` (Binary glTF 2.0) loader that loads meshes, PBR materials, embedded `baseColorTexture` images, morph targets (`targets` `POSITION`/`NORMAL` deltas + `extras.targetNames`), and skeletal `skins` (`JOINTS_0`, `WEIGHTS_0`, `inverseBindMatrices`) directly into `WorldStore` & `BufferManager`, allowing expressive 3D assets and AI avatars via `{ type: 'model', url: 'avatar.glb', morphWeights: { smile: 0.8 }, boneRotations: { Head: [0, 0.2, 0] } }` in `app.sync()` / `app.patch()`.
 * **Acceptance Criterion:** A local LLM (e.g., Qwen or Gemma via Ollama) can autonomously build an error-free 3D scene in a closed loop (`sync` → `describe` → `snapshot` → fix) using the exported tool schema.

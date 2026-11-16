@@ -13,6 +13,7 @@ export const enum DirtyFlag {
   Geometry = 1 << 2,
   Bounds = 1 << 3,
   Morph = 1 << 4,
+  Skin = 1 << 5,
 }
 
 export const enum GeometryTypeId {
@@ -26,6 +27,7 @@ export const enum GeometryTypeId {
   Light = 7,
   Cone = 8,
   Torus = 9,
+  Sprite = 10,
 }
 
 export const enum LightKindId {

@@ -1,8 +1,9 @@
 // Standard PBR-Shader + 3-Punkt-Studio-Beleuchtung + Dynamic Lights + Soft Contact Shadows + ACES Tone-Mapping
 
 struct DynamicLight {
-  posOrDir: vec4<f32>,      // xyz = world pos (point) or dir (directional), w = kind (0 = point, 1 = directional)
+  posOrDir: vec4<f32>,      // xyz = world pos (point/spot) or dir (directional), w = kind (0 = point, 1 = directional, 2 = spot)
   colorIntensity: vec4<f32>, // rgb = color, w = intensity
+  spotDir: vec4<f32>,       // xyz = normalized spot direction, w = cos(cutoffAngle)
 };
 
 struct SceneUniforms {
@@ -58,6 +59,29 @@ fn vs_main(in: VertexInput) -> VertexOutput {
   out.clipPos = scene.viewProj * worldPos;
   out.worldPos = worldPos.xyz;
   out.worldNormal = worldNormal;
+  out.uv = in.uv;
+  out.entityId = entityId;
+  return out;
+}
+
+@vertex
+fn vs_sprite(in: VertexInput) -> VertexOutput {
+  let entityId = instanceIds[in.instanceIdx];
+  let model = modelMatrices[entityId];
+  let center = model[3].xyz;
+  let sx = length(model[0].xyz);
+  let sy = length(model[1].xyz);
+
+  let toCam = normalize(scene.cameraPos.xyz - center);
+  let worldUp = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(toCam.y) > 0.99);
+  let right = normalize(cross(worldUp, toCam));
+  let up = cross(toCam, right);
+
+  let worldPos = center + right * (in.position.x * sx) + up * (in.position.y * sy);
+  var out: VertexOutput;
+  out.clipPos = scene.viewProj * vec4<f32>(worldPos, 1.0);
+  out.worldPos = worldPos;
+  out.worldNormal = toCam;
   out.uv = in.uv;
   out.entityId = entityId;
   return out;
@@ -281,28 +305,41 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
       break;
     }
     let dl = scene.lights[i];
-    let isDir = dl.posOrDir.w > 0.5;
-    if (isDir) {
+    let kind = dl.posOrDir.w;
+    if (kind > 0.5 && kind < 1.5) {
       let L = normalize(dl.posOrDir.xyz);
       Lo += evalLight(N, V, L, dl.colorIntensity.rgb * dl.colorIntensity.w, albedo, metalness, roughness, F0) * mix(0.05, 1.0, dirShadow);
     } else {
       let toLight = dl.posOrDir.xyz - in.worldPos;
       let dist = length(toLight);
       let L = toLight / max(dist, 0.001);
-      let atten = 1.0 / (1.0 + 0.14 * dist + 0.07 * dist * dist);
+      var atten = 1.0 / (1.0 + 0.14 * dist + 0.07 * dist * dist);
+      if (kind >= 1.5) {
+        let spotCos = dot(-L, normalize(dl.spotDir.xyz));
+        let outerCos = dl.spotDir.w;
+        let innerCos = mix(outerCos, 1.0, 0.25);
+        atten *= smoothstep(outerCos, innerCos, spotCos);
+      }
       Lo += evalLight(N, V, L, dl.colorIntensity.rgb * dl.colorIntensity.w * atten, albedo, metalness, roughness, F0);
     }
   }
 
   let contactShadow = computeContactShadow(in.worldPos, N);
 
-  // Hemisphere Ambient (subtil bei eigenen Lichtquellen für echten Tag/Nacht-Kontrast)
+  // Hemisphere Ambient + Procedural IBL Environment Reflection
   let hemiFactor = N.y * 0.5 + 0.5;
   let ambientLight = mix(scene.groundColor.rgb, scene.skyColor.rgb, hemiFactor);
   let ambientFactor = select(0.35, 0.04, hasCustomLights);
   let ambient = ambientLight * albedo * (1.0 - metalness * 0.6) * ambientFactor * contactShadow;
 
-  let hdr = ambient + Lo * mix(0.45, 1.0, contactShadow) + albedo * emissive;
+  let R = reflect(-V, N);
+  let envHemi = mix(scene.groundColor.rgb * 0.65, scene.skyColor.rgb, smoothstep(-0.25, 0.65, R.y));
+  let envSun = pow(max(dot(R, keyDir), 0.0), mix(48.0, 4.0, roughness)) * scene.keyLightColor.rgb * 0.85;
+  let envFresnel = fresnelSchlick(max(dot(N, V), 0.0), F0);
+  let iblScale = select(0.42, 0.14, hasCustomLights) * (1.0 - roughness * 0.72);
+  let envReflection = (envHemi + envSun) * envFresnel * iblScale * contactShadow;
+
+  let hdr = ambient + envReflection + Lo * mix(0.45, 1.0, contactShadow) + albedo * emissive;
   let mapped = acesToneMap(hdr);
   let srgb = pow(mapped, vec3<f32>(1.0 / 2.2));
   return vec4<f32>(srgb, baseColor.a * texSample.a);
@@ -311,4 +348,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 @fragment
 fn fs_unlit(in: VertexOutput) -> @location(0) vec4<f32> {
   return colors[in.entityId];
+}
+
+@fragment
+fn fs_sprite(in: VertexOutput) -> @location(0) vec4<f32> {
+  let baseColor = colors[in.entityId];
+  let params = pbrParams[in.entityId];
+  let packedMatTex = u32(max(params.w + 0.5, 0.0));
+  let textureId = i32(packedMatTex >> 8u);
+  let texSample = textureSample(albedoTextures, albedoSampler, in.uv, textureId);
+  let alpha = baseColor.a * texSample.a;
+  if (alpha < 0.02) {
+    discard;
+  }
+  return vec4<f32>(baseColor.rgb * texSample.rgb, alpha);
 }

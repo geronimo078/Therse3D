@@ -9,9 +9,11 @@ import {
   createLineGeometry,
   createPlaneGeometry,
   createSphereGeometry,
+  createSpriteGeometry,
   createTorusGeometry,
   type GeometryMeshData,
   type MorphTargetData,
+  type SkinData,
 } from '../entities/Primitives';
 import type { EnginePreset } from '../core/Engine';
 import type { Camera } from '../controls/OrbitControls';
@@ -19,6 +21,7 @@ import pbrShaderCode from './shaders/pbr.wgsl?raw';
 import idDepthShaderCode from './shaders/id_depth.wgsl?raw';
 import volumetricShaderCode from './shaders/volumetric.wgsl?raw';
 import bloomShaderCode from './shaders/bloom.wgsl?raw';
+import fxaaShaderCode from './shaders/fxaa.wgsl?raw';
 import { parseColor } from '../entities/Materials';
 
 export interface BloomConfig {
@@ -50,12 +53,18 @@ interface GeometryGpuMesh {
   indexBuffer: GPUBuffer;
   indexCount: number;
   indexFormat: GPUIndexFormat;
-  morph?: {
+  deform?: {
     baseVertices: Float32Array;
-    morphedVertices: Float32Array;
-    morphTargets: MorphTargetData[];
-    targetNames: string[];
+    deformedVertices: Float32Array;
     perEntityBuffers: Map<number, GPUBuffer>;
+    morphTargets?: MorphTargetData[];
+    targetNames?: string[];
+    skin?: SkinData;
+    jointNames?: string[];
+    perEntityJointRotations?: Map<number, Map<string, [number, number, number, number]>>;
+    localMats?: Float32Array;
+    worldMats?: Float32Array;
+    skinMats?: Float32Array;
   };
 }
 
@@ -147,6 +156,7 @@ export class Renderer {
   private preset: EnginePreset;
   private readonly pipeline: GPURenderPipeline;
   private readonly transparentPipeline: GPURenderPipeline;
+  private readonly spritePipeline: GPURenderPipeline;
   private readonly linePipeline: GPURenderPipeline;
   private readonly shadowPipeline: GPURenderPipeline;
   private readonly bindGroupLayout: GPUBindGroupLayout;
@@ -161,8 +171,8 @@ export class Renderer {
   private nextCustomMeshId = 1;
 
   private readonly uniformBuffer: GPUBuffer;
-  // mat4(16) + 5*vec4(20) + counts(4) + 8*DynamicLight(64) + 16*vec4 shadowCasters(64) + lightViewProj(16) = 184 floats
-  private readonly uniformScratch = new Float32Array(184);
+  // mat4(16) + 5*vec4(20) + counts(4) + 8*DynamicLight(96) + 16*vec4 shadowCasters(64) + lightViewProj(16) = 216 floats
+  private readonly uniformScratch = new Float32Array(216);
   private readonly lightViewScratch = new Float32Array(16);
   private readonly lightProjScratch = new Float32Array(16);
   private readonly lightViewProjScratch = new Float32Array(16);
@@ -244,6 +254,14 @@ export class Renderer {
     intensity: 0.65,
     radius: 1.5,
   };
+
+  // Lightweight FXAA Post-Pass (auto-enabled in Low-Spec / sampleCount === 1)
+  private fxaaEnabled = false;
+  private fxaaPipeline: GPURenderPipeline | null = null;
+  private fxaaBindGroupLayout: GPUBindGroupLayout | null = null;
+  private fxaaBindGroupScene: GPUBindGroup | null = null;
+  private fxaaBindGroupPost: GPUBindGroup | null = null;
+  private fxaaSampler: GPUSampler | null = null;
 
   constructor(
     gpu: GPUDeviceContext,
@@ -419,6 +437,50 @@ export class Renderer {
       },
     });
 
+    this.spritePipeline = gpu.device.createRenderPipeline({
+      label: 'sprite-billboard-pipeline',
+      layout: gpu.device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] }),
+      vertex: {
+        module: shaderModule,
+        entryPoint: 'vs_sprite',
+        buffers: [
+          {
+            arrayStride: 8 * 4,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 3 * 4, format: 'float32x3' },
+              { shaderLocation: 2, offset: 6 * 4, format: 'float32x2' },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: 'fs_sprite',
+        targets: [
+          {
+            format: gpu.format,
+            blend: {
+              color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            },
+          },
+        ],
+      },
+      primitive: {
+        topology: 'triangle-list',
+        cullMode: 'none',
+      },
+      depthStencil: {
+        format: 'depth24plus',
+        depthWriteEnabled: false,
+        depthCompare: 'less',
+      },
+      multisample: {
+        count: this.sampleCount,
+      },
+    });
+
     this.linePipeline = gpu.device.createRenderPipeline({
       label: 'line-instanced-pipeline',
       layout: gpu.device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] }),
@@ -489,8 +551,14 @@ export class Renderer {
     this.uploadPrimitiveMesh(GeometryTypeId.Line, createLineGeometry(), 'line');
     this.uploadPrimitiveMesh(GeometryTypeId.Cone, createConeGeometry(), 'cone');
     this.uploadPrimitiveMesh(GeometryTypeId.Torus, createTorusGeometry(), 'torus');
+    this.uploadPrimitiveMesh(GeometryTypeId.Sprite, createSpriteGeometry(), 'sprite');
 
+    this.fxaaEnabled = this.sampleCount === 1;
     this.ensureStorageCapacity(store.capacity);
+  }
+
+  setFxaa(enabled: boolean): void {
+    this.fxaaEnabled = enabled;
   }
 
   setPreset(preset: EnginePreset): void {
@@ -513,19 +581,35 @@ export class Renderer {
     const vertexBuffer = this.buffers.createVertexBuffer(data.vertices, `${label}-${id}-vb`);
     const indexBuffer = this.buffers.createIndexBuffer(data.indices, `${label}-${id}-ib`);
     const hasMorphs = Array.isArray(data.morphTargets) && data.morphTargets.length > 0;
+    const hasSkin = Boolean(data.skin && data.skin.joints.length > 0);
+    const jointCount = data.skin?.joints.length ?? 0;
     this.customMeshes.set(id, {
       vertexBuffer,
       indexBuffer,
       indexCount: data.indices.length,
       indexFormat: data.indices instanceof Uint32Array ? 'uint32' : 'uint16',
-      ...(hasMorphs
+      ...(hasMorphs || hasSkin
         ? {
-          morph: {
+          deform: {
             baseVertices: new Float32Array(data.vertices),
-            morphedVertices: new Float32Array(data.vertices),
-            morphTargets: data.morphTargets!,
-            targetNames: data.morphTargets!.map((t) => t.name),
+            deformedVertices: new Float32Array(data.vertices),
             perEntityBuffers: new Map<number, GPUBuffer>(),
+            ...(hasMorphs
+              ? {
+                morphTargets: data.morphTargets!,
+                targetNames: data.morphTargets!.map((t) => t.name),
+              }
+              : {}),
+            ...(hasSkin
+              ? {
+                skin: data.skin!,
+                jointNames: data.skin!.joints.map((j) => j.name),
+                perEntityJointRotations: new Map(),
+                localMats: new Float32Array(jointCount * 16),
+                worldMats: new Float32Array(jointCount * 16),
+                skinMats: new Float32Array(jointCount * 16),
+              }
+              : {}),
           },
         }
         : {}),
@@ -534,7 +618,52 @@ export class Renderer {
   }
 
   getMeshMorphTargetNames(meshId: number): string[] {
-    return this.customMeshes.get(meshId)?.morph?.targetNames ?? [];
+    return this.customMeshes.get(meshId)?.deform?.targetNames ?? [];
+  }
+
+  getMeshBoneNames(meshId: number): string[] {
+    return this.customMeshes.get(meshId)?.deform?.jointNames ?? [];
+  }
+
+  setEntityBoneRotations(
+    entityId: number,
+    rotations: Record<string, [number, number, number] | [number, number, number, number]>,
+    warnings: string[] = [],
+  ): void {
+    const meshId = this.store.meshIds[entityId] ?? -1;
+    const mesh = meshId >= 0 ? this.customMeshes.get(meshId) : undefined;
+    if (!mesh?.deform?.skin || !mesh.deform.perEntityJointRotations) return;
+
+    const jointNames = mesh.deform.jointNames ?? [];
+    let map = mesh.deform.perEntityJointRotations.get(entityId);
+    if (!map) {
+      map = new Map();
+      mesh.deform.perEntityJointRotations.set(entityId, map);
+    }
+
+    for (const [boneName, val] of Object.entries(rotations)) {
+      if (!jointNames.includes(boneName)) {
+        warnings.push(`Unknown bone "${boneName}" on entity-${entityId}. Available: [${jointNames.join(', ')}].`);
+        continue;
+      }
+      if (Array.isArray(val) && val.length === 4) {
+        map.set(boneName, [val[0], val[1], val[2], val[3]]);
+      } else if (Array.isArray(val) && val.length >= 3) {
+        const cx = Math.cos((val[0] ?? 0) * 0.5);
+        const sx = Math.sin((val[0] ?? 0) * 0.5);
+        const cy = Math.cos((val[1] ?? 0) * 0.5);
+        const sy = Math.sin((val[1] ?? 0) * 0.5);
+        const cz = Math.cos((val[2] ?? 0) * 0.5);
+        const sz = Math.sin((val[2] ?? 0) * 0.5);
+        map.set(boneName, [
+          sx * cy * cz + cx * sy * sz,
+          cx * sy * cz - sx * cy * sz,
+          cx * cy * sz + sx * sy * cz,
+          cx * cy * cz - sx * sy * sz,
+        ]);
+      }
+    }
+    this.store.markDirty(entityId, DirtyFlag.Skin);
   }
 
   unloadMesh(meshId: number): void {
@@ -542,11 +671,12 @@ export class Renderer {
     if (!mesh) return;
     this.buffers.destroyBuffer(mesh.vertexBuffer);
     this.buffers.destroyBuffer(mesh.indexBuffer);
-    if (mesh.morph) {
-      for (const vb of mesh.morph.perEntityBuffers.values()) {
+    if (mesh.deform) {
+      for (const vb of mesh.deform.perEntityBuffers.values()) {
         this.buffers.destroyBuffer(vb);
       }
-      mesh.morph.perEntityBuffers.clear();
+      mesh.deform.perEntityBuffers.clear();
+      mesh.deform.perEntityJointRotations?.clear();
     }
     this.customMeshes.delete(meshId);
   }
@@ -903,6 +1033,58 @@ export class Renderer {
     this.depthView = this.depthTexture.createView();
     this.rebuildVolumetricBindGroup();
     this.rebuildBloomBindGroups();
+    this.rebuildFxaaBindGroups();
+  }
+
+  private ensureFxaaPipeline(): void {
+    if (this.fxaaPipeline) return;
+    const device = this.gpu.device;
+    this.fxaaSampler = device.createSampler({
+      label: 'fxaa-sampler',
+      magFilter: 'linear',
+      minFilter: 'linear',
+    });
+    this.fxaaBindGroupLayout = device.createBindGroupLayout({
+      label: 'fxaa-bind-group-layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      ],
+    });
+    const mod = device.createShaderModule({ label: 'fxaa-shader', code: fxaaShaderCode });
+    this.fxaaPipeline = device.createRenderPipeline({
+      label: 'fxaa-pipeline',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.fxaaBindGroupLayout] }),
+      vertex: { module: mod, entryPoint: 'vs_fxaa' },
+      fragment: {
+        module: mod,
+        entryPoint: 'fs_fxaa',
+        targets: [{ format: this.gpu.format }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+  }
+
+  private rebuildFxaaBindGroups(): void {
+    if (!this.fxaaBindGroupLayout || !this.fxaaSampler || !this.sceneColorView || !this.postColorView) {
+      return;
+    }
+    this.fxaaBindGroupScene = this.gpu.device.createBindGroup({
+      label: 'fxaa-bind-group-scene',
+      layout: this.fxaaBindGroupLayout,
+      entries: [
+        { binding: 0, resource: this.sceneColorView },
+        { binding: 1, resource: this.fxaaSampler },
+      ],
+    });
+    this.fxaaBindGroupPost = this.gpu.device.createBindGroup({
+      label: 'fxaa-bind-group-post',
+      layout: this.fxaaBindGroupLayout,
+      entries: [
+        { binding: 0, resource: this.postColorView },
+        { binding: 1, resource: this.fxaaSampler },
+      ],
+    });
   }
 
   renderFrame(camera?: Camera, elapsed = 0): void {
@@ -915,7 +1097,7 @@ export class Renderer {
 
     this.ensureRenderTargets(width, height);
     this.ensureStorageCapacity(this.store.capacity);
-    this.updateMorphedMeshes();
+    this.updateDeformedMeshes();
 
     const presetCfg = PRESETS[this.preset];
     const u = this.uniformScratch;
@@ -978,7 +1160,7 @@ export class Renderer {
         }
 
         if (gType === GeometryTypeId.Light && dynamicLightCount < 8) {
-          const base = 40 + dynamicLightCount * 8;
+          const base = 40 + dynamicLightCount * 12;
           const mOff = id * 16;
           const cOff = id * 4;
           const lx = mats[mOff + 12] ?? 0;
@@ -988,14 +1170,24 @@ export class Renderer {
           u[base + 0] = lx;
           u[base + 1] = ly;
           u[base + 2] = lz;
-          u[base + 3] = kind; // kind: 0 = point, 1 = directional
+          u[base + 3] = kind; // kind: 0 = point, 1 = directional, 2 = spot
           u[base + 4] = cols[cOff] ?? 1;
           u[base + 5] = cols[cOff + 1] ?? 1;
           u[base + 6] = cols[cOff + 2] ?? 1;
           u[base + 7] = lParams[cOff + 1] ?? 1; // intensity
+          // Spot direction = local -Z axis from model matrix (column 2 negated)
+          const sx = -(mats[mOff + 8] ?? 0);
+          const sy = -(mats[mOff + 9] ?? -1);
+          const sz = -(mats[mOff + 10] ?? 0);
+          const sLen = Math.hypot(sx, sy, sz) || 1;
+          u[base + 8] = sx / sLen;
+          u[base + 9] = sy / sLen;
+          u[base + 10] = sz / sLen;
+          const spotCut = lParams[cOff + 3] ?? 0;
+          u[base + 11] = spotCut > 0 && spotCut < 1 ? spotCut : 0.866; // cos(30 deg)
           dynamicLightCount++;
 
-          if (kind > 0.5 && Math.hypot(lx, ly, lz) > 1e-4) {
+          if (kind > 0.5 && kind < 1.5 && Math.hypot(lx, ly, lz) > 1e-4) {
             u[28] = lx;
             u[29] = ly;
             u[30] = lz;
@@ -1005,7 +1197,7 @@ export class Renderer {
           (gType === GeometryTypeId.Box || gType === GeometryTypeId.Sphere || gType === GeometryTypeId.Cylinder) &&
           shadowCasterCount < 16
         ) {
-          const base = 104 + shadowCasterCount * 4;
+          const base = 136 + shadowCasterCount * 4;
           const pIdx = id * 3;
           const minX = bMin[pIdx] ?? 0;
           const minY = bMin[pIdx + 1] ?? 0;
@@ -1067,7 +1259,8 @@ export class Renderer {
     const swapchainView = this.gpu.context.getCurrentTexture().createView();
     const useVolumetric = this.volumetricEnabled;
     const useBloom = this.bloomEnabled;
-    const usePost = useVolumetric || useBloom;
+    const useFxaa = this.fxaaEnabled;
+    const usePost = useVolumetric || useBloom || useFxaa;
     if (useVolumetric) {
       this.ensureVolumetricPipeline();
       if (!this.volumetricBindGroup) {
@@ -1078,6 +1271,12 @@ export class Renderer {
       this.ensureBloomPipeline();
       if (!this.bloomBindGroupScene || !this.bloomBindGroupPost) {
         this.rebuildBloomBindGroups();
+      }
+    }
+    if (useFxaa) {
+      this.ensureFxaaPipeline();
+      if (!this.fxaaBindGroupScene || !this.fxaaBindGroupPost) {
+        this.rebuildFxaaBindGroups();
       }
     }
 
@@ -1124,6 +1323,24 @@ export class Renderer {
         pass.setVertexBuffer(0, lineMesh.vertexBuffer);
         pass.setIndexBuffer(lineMesh.indexBuffer, lineMesh.indexFormat);
         pass.drawIndexed(lineMesh.indexCount, lineCount, 0, 0, offsets[GeometryTypeId.Line] ?? 0);
+      }
+    }
+
+    const spriteMesh = this.meshes.get(GeometryTypeId.Sprite);
+    if (spriteMesh) {
+      const opaqueSprites = counts[GeometryTypeId.Sprite] ?? 0;
+      const transSprites = tCounts[GeometryTypeId.Sprite] ?? 0;
+      if (opaqueSprites > 0 || transSprites > 0) {
+        pass.setPipeline(this.spritePipeline);
+        pass.setBindGroup(0, this.bindGroup);
+        pass.setVertexBuffer(0, spriteMesh.vertexBuffer);
+        pass.setIndexBuffer(spriteMesh.indexBuffer, spriteMesh.indexFormat);
+        if (opaqueSprites > 0) {
+          pass.drawIndexed(spriteMesh.indexCount, opaqueSprites, 0, 0, offsets[GeometryTypeId.Sprite] ?? 0);
+        }
+        if (transSprites > 0) {
+          pass.drawIndexed(spriteMesh.indexCount, transSprites, 0, 0, tOffsets[GeometryTypeId.Sprite] ?? 0);
+        }
       }
     }
 
@@ -1194,7 +1411,7 @@ export class Renderer {
       const vPass = encoder.beginRenderPass({
         colorAttachments: [
           {
-            view: useBloom ? this.postColorView! : swapchainView,
+            view: useBloom || useFxaa ? this.postColorView! : swapchainView,
             clearValue: presetCfg.clearColor,
             loadOp: 'clear',
             storeOp: 'store',
@@ -1225,7 +1442,7 @@ export class Renderer {
         const bPass = encoder.beginRenderPass({
           colorAttachments: [
             {
-              view: swapchainView,
+              view: useFxaa ? this.sceneColorView! : swapchainView,
               clearValue: presetCfg.clearColor,
               loadOp: 'clear',
               storeOp: 'store',
@@ -1236,6 +1453,27 @@ export class Renderer {
         bPass.setBindGroup(0, bloomBindGroup);
         bPass.draw(3);
         bPass.end();
+      }
+    }
+
+    if (useFxaa && this.fxaaPipeline) {
+      const fxaaBg =
+        useVolumetric && !useBloom ? this.fxaaBindGroupPost : this.fxaaBindGroupScene;
+      if (fxaaBg) {
+        const fPass = encoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: swapchainView,
+              clearValue: presetCfg.clearColor,
+              loadOp: 'clear',
+              storeOp: 'store',
+            },
+          ],
+        });
+        fPass.setPipeline(this.fxaaPipeline);
+        fPass.setBindGroup(0, fxaaBg);
+        fPass.draw(3);
+        fPass.end();
       }
     }
 
@@ -1256,7 +1494,7 @@ export class Renderer {
     );
     mat4.ortho(this.lightProjScratch, -8, 8, -8, 8, 2, 36);
     mat4.multiply(this.lightViewProjScratch, this.lightProjScratch, this.lightViewScratch);
-    this.uniformScratch.set(this.lightViewProjScratch, 168);
+    this.uniformScratch.set(this.lightViewProjScratch, 200);
   }
 
   private recordShadowPass(encoder: GPUCommandEncoder, counts: Uint32Array, offsets: Uint32Array): void {
@@ -1300,7 +1538,7 @@ export class Renderer {
         if (meshId < 0) continue;
         const mesh = this.customMeshes.get(meshId);
         if (!mesh) continue;
-        const vb = mesh.morph?.perEntityBuffers.get(entityId) ?? mesh.vertexBuffer;
+        const vb = mesh.deform?.perEntityBuffers.get(entityId) ?? mesh.vertexBuffer;
         pass.setVertexBuffer(0, vb);
         pass.setIndexBuffer(mesh.indexBuffer, mesh.indexFormat);
         pass.drawIndexed(mesh.indexCount, 1, 0, 0, slot);
@@ -1691,7 +1929,7 @@ export class Renderer {
     }
   }
 
-  private updateMorphedMeshes(): void {
+  private updateDeformedMeshes(): void {
     if (this.customMeshes.size === 0) return;
 
     const store = this.store;
@@ -1704,47 +1942,134 @@ export class Renderer {
 
     for (let id = 0; id < n; id++) {
       if (alive[id] === 0 || types[id] !== GeometryTypeId.Model) continue;
-      if (((dirty[id] ?? 0) & DirtyFlag.Morph) === 0) continue;
+      const dFlag = dirty[id] ?? 0;
+      if ((dFlag & (DirtyFlag.Morph | DirtyFlag.Skin)) === 0) continue;
 
       const meshId = meshIds[id] ?? -1;
       const mesh = meshId >= 0 ? this.customMeshes.get(meshId) : undefined;
-      if (!mesh || !mesh.morph) {
-        dirty[id] = (dirty[id] ?? 0) & ~DirtyFlag.Morph;
+      if (!mesh || !mesh.deform) {
+        dirty[id] = dFlag & ~(DirtyFlag.Morph | DirtyFlag.Skin);
         continue;
       }
 
-      const { baseVertices, morphedVertices, morphTargets, perEntityBuffers } = mesh.morph;
-      morphedVertices.set(baseVertices);
+      const {
+        baseVertices,
+        deformedVertices,
+        perEntityBuffers,
+        morphTargets,
+        skin,
+        perEntityJointRotations,
+        localMats,
+        worldMats,
+        skinMats,
+      } = mesh.deform;
+      deformedVertices.set(baseVertices);
 
       const vertCount = (baseVertices.length / 8) | 0;
-      const targetCount = Math.min(morphTargets.length, MAX_MORPH_TARGETS);
-      const wBase = id * MAX_MORPH_TARGETS;
       let normalsModified = false;
 
-      for (let t = 0; t < targetCount; t++) {
-        const w = weights[wBase + t] ?? 0;
-        if (Math.abs(w) < 1e-6) continue;
+      if (morphTargets && morphTargets.length > 0) {
+        const targetCount = Math.min(morphTargets.length, MAX_MORPH_TARGETS);
+        const wBase = id * MAX_MORPH_TARGETS;
+        for (let t = 0; t < targetCount; t++) {
+          const w = weights[wBase + t] ?? 0;
+          if (Math.abs(w) < 1e-6) continue;
 
-        const target = morphTargets[t]!;
-        const pDeltas = target.positionDeltas;
-        const nDeltas = target.normalDeltas;
+          const target = morphTargets[t]!;
+          const pDeltas = target.positionDeltas;
+          const nDeltas = target.normalDeltas;
 
-        for (let v = 0; v < vertCount; v++) {
-          const vOff = v * 8;
-          const dOff = v * 3;
-          morphedVertices[vOff] = (morphedVertices[vOff] ?? 0) + (pDeltas[dOff] ?? 0) * w;
-          morphedVertices[vOff + 1] = (morphedVertices[vOff + 1] ?? 0) + (pDeltas[dOff + 1] ?? 0) * w;
-          morphedVertices[vOff + 2] = (morphedVertices[vOff + 2] ?? 0) + (pDeltas[dOff + 2] ?? 0) * w;
-        }
-
-        if (nDeltas) {
-          normalsModified = true;
           for (let v = 0; v < vertCount; v++) {
             const vOff = v * 8;
             const dOff = v * 3;
-            morphedVertices[vOff + 3] = (morphedVertices[vOff + 3] ?? 0) + (nDeltas[dOff] ?? 0) * w;
-            morphedVertices[vOff + 4] = (morphedVertices[vOff + 4] ?? 0) + (nDeltas[dOff + 1] ?? 0) * w;
-            morphedVertices[vOff + 5] = (morphedVertices[vOff + 5] ?? 0) + (nDeltas[dOff + 2] ?? 0) * w;
+            deformedVertices[vOff] = (deformedVertices[vOff] ?? 0) + (pDeltas[dOff] ?? 0) * w;
+            deformedVertices[vOff + 1] = (deformedVertices[vOff + 1] ?? 0) + (pDeltas[dOff + 1] ?? 0) * w;
+            deformedVertices[vOff + 2] = (deformedVertices[vOff + 2] ?? 0) + (pDeltas[dOff + 2] ?? 0) * w;
+          }
+
+          if (nDeltas) {
+            normalsModified = true;
+            for (let v = 0; v < vertCount; v++) {
+              const vOff = v * 8;
+              const dOff = v * 3;
+              deformedVertices[vOff + 3] = (deformedVertices[vOff + 3] ?? 0) + (nDeltas[dOff] ?? 0) * w;
+              deformedVertices[vOff + 4] = (deformedVertices[vOff + 4] ?? 0) + (nDeltas[dOff + 1] ?? 0) * w;
+              deformedVertices[vOff + 5] = (deformedVertices[vOff + 5] ?? 0) + (nDeltas[dOff + 2] ?? 0) * w;
+            }
+          }
+        }
+      }
+
+      if (skin && localMats && worldMats && skinMats) {
+        const jCount = skin.joints.length;
+        const rotOverrides = perEntityJointRotations?.get(id);
+        for (let j = 0; j < jCount; j++) {
+          const jt = skin.joints[j]!;
+          const r = rotOverrides?.get(jt.name) ?? jt.bindRotation;
+          mat4.fromTranslationRotationScale(
+            localMats,
+            j * 16,
+            jt.bindTranslation[0],
+            jt.bindTranslation[1],
+            jt.bindTranslation[2],
+            r[0],
+            r[1],
+            r[2],
+            r[3],
+            jt.bindScale[0],
+            jt.bindScale[1],
+            jt.bindScale[2],
+          );
+          if (jt.parentIndex >= 0 && jt.parentIndex < j) {
+            mulMat4Offset(worldMats, j * 16, worldMats, jt.parentIndex * 16, localMats, j * 16);
+          } else {
+            for (let k = 0; k < 16; k++) {
+              worldMats[j * 16 + k] = localMats[j * 16 + k] ?? 0;
+            }
+          }
+          mulMat4Offset(skinMats, j * 16, worldMats, j * 16, jt.inverseBindMatrix, 0);
+        }
+
+        const jIndices = skin.jointIndices;
+        const jWeights = skin.jointWeights;
+        normalsModified = true;
+        for (let v = 0; v < vertCount; v++) {
+          const vOff = v * 8;
+          const jOff = v * 4;
+          const px = deformedVertices[vOff] ?? 0;
+          const py = deformedVertices[vOff + 1] ?? 0;
+          const pz = deformedVertices[vOff + 2] ?? 0;
+          const nx = deformedVertices[vOff + 3] ?? 0;
+          const ny = deformedVertices[vOff + 4] ?? 1;
+          const nz = deformedVertices[vOff + 5] ?? 0;
+
+          let spx = 0, spy = 0, spz = 0;
+          let snx = 0, sny = 0, snz = 0;
+          let totalW = 0;
+
+          for (let k = 0; k < 4; k++) {
+            const w = jWeights[jOff + k] ?? 0;
+            if (w <= 1e-6) continue;
+            const ji = jIndices[jOff + k] ?? 0;
+            if (ji >= jCount) continue;
+            const m = ji * 16;
+            totalW += w;
+            spx += ((skinMats[m] ?? 1) * px + (skinMats[m + 4] ?? 0) * py + (skinMats[m + 8] ?? 0) * pz + (skinMats[m + 12] ?? 0)) * w;
+            spy += ((skinMats[m + 1] ?? 0) * px + (skinMats[m + 5] ?? 1) * py + (skinMats[m + 9] ?? 0) * pz + (skinMats[m + 13] ?? 0)) * w;
+            spz += ((skinMats[m + 2] ?? 0) * px + (skinMats[m + 6] ?? 0) * py + (skinMats[m + 10] ?? 1) * pz + (skinMats[m + 14] ?? 0)) * w;
+
+            snx += ((skinMats[m] ?? 1) * nx + (skinMats[m + 4] ?? 0) * ny + (skinMats[m + 8] ?? 0) * nz) * w;
+            sny += ((skinMats[m + 1] ?? 0) * nx + (skinMats[m + 5] ?? 1) * ny + (skinMats[m + 9] ?? 0) * nz) * w;
+            snz += ((skinMats[m + 2] ?? 0) * nx + (skinMats[m + 6] ?? 0) * ny + (skinMats[m + 10] ?? 1) * nz) * w;
+          }
+
+          if (totalW > 1e-6) {
+            deformedVertices[vOff] = spx;
+            deformedVertices[vOff + 1] = spy;
+            deformedVertices[vOff + 2] = spz;
+            deformedVertices[vOff + 3] = snx;
+            deformedVertices[vOff + 4] = sny;
+            deformedVertices[vOff + 5] = snz;
           }
         }
       }
@@ -1752,31 +2077,54 @@ export class Renderer {
       if (normalsModified) {
         for (let v = 0; v < vertCount; v++) {
           const vOff = v * 8;
-          const nx = morphedVertices[vOff + 3] ?? 0;
-          const ny = morphedVertices[vOff + 4] ?? 1;
-          const nz = morphedVertices[vOff + 5] ?? 0;
+          const nx = deformedVertices[vOff + 3] ?? 0;
+          const ny = deformedVertices[vOff + 4] ?? 1;
+          const nz = deformedVertices[vOff + 5] ?? 0;
           const len = Math.hypot(nx, ny, nz);
           if (len > 1e-6) {
-            morphedVertices[vOff + 3] = nx / len;
-            morphedVertices[vOff + 4] = ny / len;
-            morphedVertices[vOff + 5] = nz / len;
+            deformedVertices[vOff + 3] = nx / len;
+            deformedVertices[vOff + 4] = ny / len;
+            deformedVertices[vOff + 5] = nz / len;
           }
         }
       }
 
       let vb = perEntityBuffers.get(id);
       if (!vb) {
-        vb = this.buffers.createVertexBuffer(morphedVertices, `morph-${meshId}-entity-${id}-vb`);
+        vb = this.buffers.createVertexBuffer(deformedVertices, `deform-${meshId}-entity-${id}-vb`);
         perEntityBuffers.set(id, vb);
       } else {
-        this.gpu.device.queue.writeBuffer(vb, 0, morphedVertices as Float32Array<ArrayBuffer>);
+        this.gpu.device.queue.writeBuffer(vb, 0, deformedVertices as Float32Array<ArrayBuffer>);
       }
 
-      dirty[id] = (dirty[id] ?? 0) & ~DirtyFlag.Morph;
+      dirty[id] = dFlag & ~(DirtyFlag.Morph | DirtyFlag.Skin);
     }
   }
 
   dispose(): void {
     this.buffers.dispose();
+  }
+}
+
+function mulMat4Offset(
+  out: Float32Array,
+  oOff: number,
+  a: Float32Array,
+  aOff: number,
+  b: Float32Array,
+  bOff: number,
+): void {
+  for (let col = 0; col < 4; col++) {
+    const b0 = b[bOff + col * 4] ?? 0;
+    const b1 = b[bOff + col * 4 + 1] ?? 0;
+    const b2 = b[bOff + col * 4 + 2] ?? 0;
+    const b3 = b[bOff + col * 4 + 3] ?? 0;
+    for (let row = 0; row < 4; row++) {
+      out[oOff + col * 4 + row] =
+        (a[aOff + row] ?? 0) * b0 +
+        (a[aOff + 4 + row] ?? 0) * b1 +
+        (a[aOff + 8 + row] ?? 0) * b2 +
+        (a[aOff + 12 + row] ?? 0) * b3;
+    }
   }
 }

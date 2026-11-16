@@ -36,6 +36,7 @@ export interface EntityDescription {
   relations: EntityRelations;
   morphTargets?: string[];
   morphWeights?: Record<string, number>;
+  bones?: string[];
 }
 
 export interface SuggestedFix {
@@ -71,6 +72,7 @@ export interface DescribeContext {
   viewProjMatrix?: Float32Array;
   resolveName?: (entityId: number) => string | undefined;
   resolveMorphTargetNames?: (entityId: number) => string[] | undefined;
+  resolveBoneNames?: (entityId: number) => string[] | undefined;
 }
 
 const EPSILON = 1e-3;
@@ -199,6 +201,8 @@ export class Inspector {
         }
       }
 
+      const boneNames = context.resolveBoneNames?.(id);
+
       entities.push({
         id: name,
         entityId: id,
@@ -211,6 +215,7 @@ export class Inspector {
         relations,
         ...(morphTargetNames && morphTargetNames.length > 0 ? { morphTargets: morphTargetNames } : {}),
         ...(activeMorphWeights ? { morphWeights: activeMorphWeights } : {}),
+        ...(boneNames && boneNames.length > 0 ? { bones: boneNames } : {}),
       });
     }
 

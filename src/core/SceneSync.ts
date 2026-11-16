@@ -32,12 +32,15 @@ export interface SceneSyncNode extends SpatialPlacement {
   kind?: LightKind;
   intensity?: number;
   range?: number;
+  spotAngle?: number;
   castShadow?: boolean;
   from?: [number, number, number];
   to?: [number, number, number];
   url?: string;
   mesh?: GeometryMeshData;
   morphWeights?: Record<string, number> | number[];
+  boneRotations?: Record<string, [number, number, number] | [number, number, number, number]>;
+  text?: string;
 }
 
 export interface SceneSyncState {
@@ -79,6 +82,17 @@ export interface SceneSyncHooks {
     morphWeights?: Record<string, number> | number[],
   ) => void;
   onTextureRef?: (entityId: number, texture: string | number, warnings: string[]) => void;
+  onTextRef?: (
+    entityId: number,
+    text: string,
+    color: string | [number, number, number] | [number, number, number, number] | undefined,
+    warnings: string[],
+  ) => void;
+  onBoneRotations?: (
+    entityId: number,
+    boneRotations: Record<string, [number, number, number] | [number, number, number, number]>,
+    warnings: string[],
+  ) => void;
   onVolumetric?: (config: VolumetricConfig) => void;
   resolveMorphTargetNames?: (entityId: number) => string[] | undefined;
 }
@@ -94,6 +108,7 @@ const VALID_TYPE_MAP: Record<string, GeometryTypeId> = {
   light: GeometryTypeId.Light,
   cone: GeometryTypeId.Cone,
   torus: GeometryTypeId.Torus,
+  sprite: GeometryTypeId.Sprite,
 };
 
 const LIGHT_KIND_MAP: Record<string, LightKindId> = {
@@ -381,6 +396,12 @@ export class SceneSync {
       if (mappedType === GeometryTypeId.Model) {
         hooks?.onModelRef?.(entityId, node.url, node.mesh, warnings, node.morphWeights);
       }
+      if (node.boneRotations) {
+        hooks?.onBoneRotations?.(entityId, node.boneRotations, warnings);
+      }
+      if (node.text !== undefined) {
+        hooks?.onTextRef?.(entityId, node.text, node.color, warnings);
+      }
 
       // Light parameters
       if (mappedType === GeometryTypeId.Light) {
@@ -391,7 +412,12 @@ export class SceneSync {
           node.intensity !== undefined ? Math.max(0, sanitizeNum(node.intensity, 1.5, `${node.id}.intensity`, warnings)) : 1.5;
         store.lightParams[lIdx + 2] =
           node.range !== undefined ? Math.max(0.1, sanitizeNum(node.range, 10, `${node.id}.range`, warnings)) : 10;
-        store.lightParams[lIdx + 3] = node.castShadow === false ? 0 : 1;
+        store.lightParams[lIdx + 3] =
+          kind === LightKindId.Spot
+            ? Math.cos((Math.max(5, Math.min(85, sanitizeNum(node.spotAngle ?? 30, 30, `${node.id}.spotAngle`, warnings))) * Math.PI) / 180)
+            : node.castShadow === false
+              ? 0
+              : 1;
       }
 
       // Scale / Size / Radius

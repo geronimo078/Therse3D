@@ -1,5 +1,10 @@
 import type { MaterialDefinition } from './Materials';
-import type { MorphTargetData } from './Primitives';
+import type { MorphTargetData, SkinData, SkinJointData } from './Primitives';
+
+export interface GltfEmbeddedImage {
+  data: Uint8Array;
+  mimeType: string;
+}
 
 export interface GltfParsedMesh {
   name: string;
@@ -7,6 +12,8 @@ export interface GltfParsedMesh {
   indices: Uint32Array;
   material: MaterialDefinition;
   morphTargets?: MorphTargetData[];
+  skin?: SkinData;
+  baseColorImage?: GltfEmbeddedImage;
 }
 
 export interface GltfLoadResult {
@@ -31,9 +38,31 @@ interface GltfJson {
   materials?: Array<{
     pbrMetallicRoughness?: {
       baseColorFactor?: [number, number, number, number];
+      baseColorTexture?: { index: number };
       metallicFactor?: number;
       roughnessFactor?: number;
     };
+  }>;
+  textures?: Array<{
+    source?: number;
+  }>;
+  images?: Array<{
+    bufferView?: number;
+    mimeType?: string;
+    uri?: string;
+  }>;
+  nodes?: Array<{
+    name?: string;
+    mesh?: number;
+    skin?: number;
+    children?: number[];
+    translation?: [number, number, number];
+    rotation?: [number, number, number, number];
+    scale?: [number, number, number];
+  }>;
+  skins?: Array<{
+    inverseBindMatrices?: number;
+    joints: number[];
   }>;
   accessors?: Array<{
     bufferView?: number;
@@ -54,6 +83,7 @@ const GLB_MAGIC = 0x46546c67; // 'glTF'
 const CHUNK_JSON = 0x4e4f534a; // 'JSON'
 const CHUNK_BIN = 0x004e4942; // 'BIN\0'
 
+const COMPONENT_UNSIGNED_BYTE = 5121;
 const COMPONENT_UNSIGNED_SHORT = 5123;
 const COMPONENT_UNSIGNED_INT = 5125;
 const COMPONENT_FLOAT = 5126;
@@ -127,12 +157,14 @@ export class GltfLoader {
       return { meshCount: 0, meshes: [], warnings };
     }
 
+    const doc: GltfJson = json;
     const meshes: GltfParsedMesh[] = [];
-    const accessors = json.accessors ?? [];
-    const bufferViews = json.bufferViews ?? [];
+    const accessors = doc.accessors ?? [];
+    const bufferViews = doc.bufferViews ?? [];
 
-    for (let m = 0; m < json.meshes.length; m++) {
-      const mesh = json.meshes[m]!;
+    const gltfMeshes = doc.meshes ?? [];
+    for (let m = 0; m < gltfMeshes.length; m++) {
+      const mesh = gltfMeshes[m]!;
       const prims = mesh.primitives ?? [];
       for (let p = 0; p < prims.length; p++) {
         const prim = prims[p]!;
@@ -168,12 +200,17 @@ export class GltfLoader {
           indices = sequentialIndices(vertCount);
         }
 
-        const matDef = prim.material !== undefined ? json.materials?.[prim.material]?.pbrMetallicRoughness : undefined;
-        const color = matDef?.baseColorFactor ?? [0.85, 0.85, 0.88, 1.0];
+        const matIdx: number | undefined = prim.material;
+        const materialsList: GltfJson['materials'] = doc.materials;
+        const pbrMat =
+          matIdx !== undefined && Array.isArray(materialsList)
+            ? materialsList[matIdx]?.pbrMetallicRoughness
+            : undefined;
+        const color = pbrMat?.baseColorFactor ?? [0.85, 0.85, 0.88, 1.0];
         const material: MaterialDefinition = {
           color: [color[0] ?? 1, color[1] ?? 1, color[2] ?? 1, color[3] ?? 1],
-          metalness: matDef?.metallicFactor ?? 0.0,
-          roughness: matDef?.roughnessFactor ?? 0.5,
+          metalness: pbrMat?.metallicFactor ?? 0.0,
+          roughness: pbrMat?.roughnessFactor ?? 0.5,
           emissive: 0.0,
           materialId: 0,
         };
@@ -212,12 +249,84 @@ export class GltfLoader {
           }
         }
 
+        let baseColorImage: GltfEmbeddedImage | undefined;
+        const texIdx = pbrMat?.baseColorTexture?.index;
+        if (texIdx !== undefined && binChunk) {
+          const imgIdx = doc.textures?.[texIdx]?.source;
+          const imgDef = imgIdx !== undefined ? doc.images?.[imgIdx] : undefined;
+          if (imgDef?.bufferView !== undefined) {
+            const bv = bufferViews[imgDef.bufferView];
+            if (bv) {
+              const start = bv.byteOffset ?? 0;
+              const end = Math.min(binChunk.byteLength, start + bv.byteLength);
+              if (end > start) {
+                baseColorImage = {
+                  data: binChunk.slice(start, end),
+                  mimeType: imgDef.mimeType ?? 'image/png',
+                };
+              }
+            }
+          }
+        }
+
+        let skin: SkinData | undefined;
+        const jointsAccIdx = prim.attributes?.['JOINTS_0'];
+        const weightsAccIdx = prim.attributes?.['WEIGHTS_0'];
+        if (jointsAccIdx !== undefined && weightsAccIdx !== undefined && binChunk && Array.isArray(doc.skins)) {
+          const skinIdx = doc.nodes?.find((n) => n.mesh === m && n.skin !== undefined)?.skin ?? 0;
+          const skinDef = doc.skins[skinIdx];
+          const jointIndices = readJointsAccessor(accessors, bufferViews, binChunk, jointsAccIdx);
+          const jointWeights = readFloatAccessor(accessors, bufferViews, binChunk, weightsAccIdx, 4);
+          if (skinDef && Array.isArray(skinDef.joints) && jointIndices && jointWeights) {
+            const ibm =
+              skinDef.inverseBindMatrices !== undefined
+                ? readFloatAccessor(accessors, bufferViews, binChunk, skinDef.inverseBindMatrices, 16)
+                : null;
+            const nodeParent = new Map<number, number>();
+            const nodes = doc.nodes ?? [];
+            for (let ni = 0; ni < nodes.length; ni++) {
+              const ch = nodes[ni]?.children;
+              if (Array.isArray(ch)) {
+                for (const c of ch) nodeParent.set(c, ni);
+              }
+            }
+            const nodeToJoint = new Map<number, number>();
+            skinDef.joints.forEach((nodeIdx, ji) => nodeToJoint.set(nodeIdx, ji));
+
+            const joints: SkinJointData[] = skinDef.joints.map((nodeIdx, ji) => {
+              const node = nodes[nodeIdx];
+              const pNode = nodeParent.get(nodeIdx);
+              const parentIndex = pNode !== undefined ? (nodeToJoint.get(pNode) ?? -1) : -1;
+              const inverseBindMatrix = new Float32Array(16);
+              if (ibm && ibm.length >= (ji + 1) * 16) {
+                inverseBindMatrix.set(ibm.subarray(ji * 16, (ji + 1) * 16));
+              } else {
+                inverseBindMatrix[0] = 1;
+                inverseBindMatrix[5] = 1;
+                inverseBindMatrix[10] = 1;
+                inverseBindMatrix[15] = 1;
+              }
+              return {
+                name: node?.name ?? `joint_${ji}`,
+                parentIndex,
+                inverseBindMatrix,
+                bindTranslation: node?.translation ?? [0, 0, 0],
+                bindRotation: node?.rotation ?? [0, 0, 0, 1],
+                bindScale: node?.scale ?? [1, 1, 1],
+              };
+            });
+            skin = { joints, jointIndices, jointWeights };
+          }
+        }
+
         meshes.push({
           name: mesh.name ?? `mesh_${m}_${p}`,
           vertices,
           indices,
           material,
           ...(morphTargets ? { morphTargets } : {}),
+          ...(skin ? { skin } : {}),
+          ...(baseColorImage ? { baseColorImage } : {}),
         });
       }
     }
@@ -279,6 +388,44 @@ function readIndexAccessor(
     return null;
   }
   return out;
+}
+
+function readJointsAccessor(
+  accessors: NonNullable<GltfJson['accessors']>,
+  bufferViews: NonNullable<GltfJson['bufferViews']>,
+  bin: Uint8Array,
+  accessorIdx: number,
+): Uint16Array | null {
+  const acc = accessors[accessorIdx];
+  if (!acc || acc.bufferView === undefined) return null;
+  const bv = bufferViews[acc.bufferView];
+  if (!bv) return null;
+
+  const byteOffset = (bv.byteOffset ?? 0) + (acc.byteOffset ?? 0);
+  const dv = new DataView(bin.buffer, bin.byteOffset, bin.byteLength);
+  const out = new Uint16Array(acc.count * 4);
+
+  if (acc.componentType === COMPONENT_UNSIGNED_BYTE) {
+    const stride = bv.byteStride ?? 4;
+    for (let i = 0; i < acc.count; i++) {
+      const base = byteOffset + i * stride;
+      for (let c = 0; c < 4; c++) {
+        out[i * 4 + c] = dv.getUint8(base + c);
+      }
+    }
+    return out;
+  }
+  if (acc.componentType === COMPONENT_UNSIGNED_SHORT) {
+    const stride = bv.byteStride ?? 8;
+    for (let i = 0; i < acc.count; i++) {
+      const base = byteOffset + i * stride;
+      for (let c = 0; c < 4; c++) {
+        out[i * 4 + c] = dv.getUint16(base + c * 2, true);
+      }
+    }
+    return out;
+  }
+  return null;
 }
 
 function sequentialIndices(count: number): Uint32Array {

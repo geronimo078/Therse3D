@@ -5,7 +5,18 @@ import { DirtyFlag, type WorldStore } from '../core/WorldStore';
 import type { EntityHandle } from './EntityHandle';
 import type { MaterialDefinition, MaterialPresetName } from './Materials';
 
-export type PrimitiveType = 'box' | 'sphere' | 'cylinder' | 'plane' | 'line' | 'model' | 'group' | 'light' | 'cone' | 'torus';
+export type PrimitiveType =
+  | 'box'
+  | 'sphere'
+  | 'cylinder'
+  | 'plane'
+  | 'line'
+  | 'model'
+  | 'group'
+  | 'light'
+  | 'cone'
+  | 'torus'
+  | 'sprite';
 export type LightKind = 'point' | 'directional' | 'spot';
 
 export interface PrimitiveOptions extends SpatialPlacement {
@@ -26,12 +37,15 @@ export interface PrimitiveOptions extends SpatialPlacement {
   kind?: LightKind;
   intensity?: number;
   range?: number;
+  spotAngle?: number;
   castShadow?: boolean;
   from?: [number, number, number];
   to?: [number, number, number];
   url?: string;
   mesh?: GeometryMeshData;
   morphWeights?: Record<string, number> | number[];
+  boneRotations?: Record<string, [number, number, number] | [number, number, number, number]>;
+  text?: string;
 }
 
 export interface PrimitiveDescriptor extends PrimitiveOptions {
@@ -47,11 +61,29 @@ export interface MorphTargetData {
   normalDeltas?: Float32Array | null;
 }
 
+export interface SkinJointData {
+  name: string;
+  parentIndex: number;
+  inverseBindMatrix: Float32Array; // 16 floats
+  bindTranslation: [number, number, number];
+  bindRotation: [number, number, number, number];
+  bindScale: [number, number, number];
+}
+
+export interface SkinData {
+  joints: SkinJointData[];
+  /** 4 joint indices per vertex */
+  jointIndices: Uint16Array;
+  /** 4 joint weights per vertex */
+  jointWeights: Float32Array;
+}
+
 export interface GeometryMeshData {
   /** Interleaved: [px, py, pz, nx, ny, nz, u, v] = 8 floats/vertex */
   vertices: Float32Array;
   indices: Uint16Array | Uint32Array;
   morphTargets?: MorphTargetData[];
+  skin?: SkinData;
 }
 
 function makeFactory(type: PrimitiveType) {
@@ -87,6 +119,21 @@ export const Group = makeFactory('group');
 export const Light = makeFactory('light');
 export const Cone = makeFactory('cone');
 export const Torus = makeFactory('torus');
+export const Sprite = makeFactory('sprite');
+export const Text = makeFactory('sprite');
+
+export function createSpriteGeometry(): GeometryMeshData {
+  const h = 0.5;
+  // prettier-ignore
+  const vertices = new Float32Array([
+    -h, -h, 0,  0, 0, 1,  0, 1,
+     h, -h, 0,  0, 0, 1,  1, 1,
+     h,  h, 0,  0, 0, 1,  1, 0,
+    -h,  h, 0,  0, 0, 1,  0, 0,
+  ]);
+  const indices = new Uint16Array([0, 1, 2, 0, 2, 3]);
+  return { vertices, indices };
+}
 
 /**
  * Prozeduraler Unit-Box-Generator (1x1x1 um Ursprung, 24 Vertices, 36 Indices).

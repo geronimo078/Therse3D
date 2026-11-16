@@ -60,6 +60,7 @@ const PRIMITIVE_TYPE_MAP: Record<PrimitiveType, GeometryTypeId> = {
   light: GeometryTypeId.Light,
   cone: GeometryTypeId.Cone,
   torus: GeometryTypeId.Torus,
+  sprite: GeometryTypeId.Sprite,
 };
 
 /**
@@ -84,6 +85,8 @@ export class Engine {
   private readonly entitiesByName = new Map<string, EntityHandle>();
   private readonly pluginCleanups: Array<() => void> = [];
   private readonly textureCache = new Map<string, number>();
+  private readonly modelTextureCache = new Map<string, number>();
+  private readonly textTextureCache = new Map<string, number>();
   private readonly gltfLoader = new GltfLoader();
   private readonly modelCache = new Map<string, number>();
 
@@ -210,7 +213,12 @@ export class Engine {
         descriptor.range !== undefined && Number.isFinite(descriptor.range)
           ? Math.max(0.1, descriptor.range)
           : 10;
-      this.store.lightParams[cIdx + 3] = descriptor.castShadow === false ? 0 : 1;
+      this.store.lightParams[cIdx + 3] =
+        descriptor.kind === 'spot'
+          ? Math.cos((Math.max(5, Math.min(85, descriptor.spotAngle ?? 30)) * Math.PI) / 180)
+          : descriptor.castShadow === false
+            ? 0
+            : 1;
     }
 
     if (descriptor.parent) {
@@ -258,6 +266,12 @@ export class Engine {
           descriptor.id ?? `entity-${id}`,
         );
       }
+      if (descriptor.boneRotations) {
+        this.renderer.setEntityBoneRotations(id, descriptor.boneRotations);
+      }
+    }
+    if (descriptor.text !== undefined) {
+      this.applyTextRef(id, descriptor.text, descriptor.color);
     }
 
     this.entitiesById.set(id, handle);
@@ -352,6 +366,12 @@ export class Engine {
       onTextureRef: (entityId, texture, warnings) => {
         this.applyTextureRef(entityId, texture, warnings);
       },
+      onTextRef: (entityId, text, color) => {
+        this.applyTextRef(entityId, text, color);
+      },
+      onBoneRotations: (entityId, boneRotations, warnings) => {
+        this.renderer.setEntityBoneRotations(entityId, boneRotations, warnings);
+      },
       onVolumetric: (config) => {
         this.setVolumetric(config);
       },
@@ -359,6 +379,11 @@ export class Engine {
         return this.renderer.getMeshMorphTargetNames(this.store.meshIds[entityId] ?? -1);
       },
     };
+  }
+
+  setFxaa(enabled: boolean): this {
+    this.renderer.setFxaa(enabled);
+    return this;
   }
 
   setVolumetric(config: VolumetricConfig): this {
@@ -435,11 +460,70 @@ export class Engine {
         vertices: firstMesh.vertices,
         indices: firstMesh.indices,
         ...(firstMesh.morphTargets ? { morphTargets: firstMesh.morphTargets } : {}),
+        ...(firstMesh.skin ? { skin: firstMesh.skin } : {}),
       },
       firstMesh.name || url,
     );
+    if (
+      firstMesh.baseColorImage &&
+      typeof Blob !== 'undefined' &&
+      typeof createImageBitmap !== 'undefined'
+    ) {
+      try {
+        const imgBytes = firstMesh.baseColorImage.data;
+        const blob = new Blob([imgBytes as Uint8Array<ArrayBuffer>], {
+          type: firstMesh.baseColorImage.mimeType,
+        });
+        const bitmap = await createImageBitmap(blob);
+        const texId = this.renderer.registerTexture(bitmap);
+        bitmap.close();
+        this.modelTextureCache.set(url, texId);
+      } catch {
+        // Ignore unsupported embedded image formats
+      }
+    }
     this.modelCache.set(url, meshId);
     return meshId;
+  }
+
+  private applyTextRef(
+    entityId: number,
+    text: string,
+    color?: string | [number, number, number] | [number, number, number, number],
+  ): void {
+    const key = `${text}|${Array.isArray(color) ? color.join(',') : (color ?? '')}`;
+    const cached = this.textTextureCache.get(key);
+    if (cached !== undefined) {
+      this.store.setTextureId(entityId, cached);
+      return;
+    }
+    if (typeof document === 'undefined') return;
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, 512, 128);
+    ctx.fillStyle = 'rgba(10, 16, 30, 0.84)';
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.85)';
+    ctx.lineWidth = 4;
+    if (typeof ctx.roundRect === 'function') {
+      ctx.beginPath();
+      ctx.roundRect(8, 12, 496, 104, 24);
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      ctx.fillRect(8, 12, 496, 104);
+      ctx.strokeRect(8, 12, 496, 104);
+    }
+    ctx.font = 'bold 42px system-ui, -apple-system, Segoe UI, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillText(text, 256, 66, 460);
+    const texId = this.registerTexture(canvas);
+    this.textTextureCache.set(key, texId);
+    this.store.setTextureId(entityId, texId);
   }
 
   private applyModelRef(
@@ -464,6 +548,10 @@ export class Engine {
     const cached = this.modelCache.get(url);
     if (cached !== undefined) {
       this.store.meshIds[entityId] = cached;
+      const cachedTex = this.modelTextureCache.get(url);
+      if (cachedTex !== undefined && (this.store.textureIds[entityId] ?? 0) === 0) {
+        this.store.setTextureId(entityId, cachedTex);
+      }
       const names = this.renderer.getMeshMorphTargetNames(cached);
       if (names.length > 0) {
         this.store.morphTargetCounts[entityId] = Math.min(64, names.length);
@@ -476,6 +564,10 @@ export class Engine {
       .then((meshId) => {
         if (this.store.alive[entityId] === 1) {
           this.store.meshIds[entityId] = meshId;
+          const loadedTex = this.modelTextureCache.get(url);
+          if (loadedTex !== undefined && (this.store.textureIds[entityId] ?? 0) === 0) {
+            this.store.setTextureId(entityId, loadedTex);
+          }
           const names = this.renderer.getMeshMorphTargetNames(meshId);
           if (names.length > 0) {
             this.store.morphTargetCounts[entityId] = Math.min(64, names.length);
@@ -578,6 +670,7 @@ export class Engine {
       viewProjMatrix: vp,
       resolveName: (id) => this.entitiesById.get(id)?.name,
       resolveMorphTargetNames: (id) => this.renderer.getMeshMorphTargetNames(this.store.meshIds[id] ?? -1),
+      resolveBoneNames: (id) => this.renderer.getMeshBoneNames(this.store.meshIds[id] ?? -1),
     });
   }
 

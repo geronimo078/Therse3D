@@ -39,7 +39,7 @@ export const THERSE3D_SCENE_SCHEMA = {
           id: { type: 'string' },
           type: {
             type: 'string',
-            enum: ['box', 'sphere', 'cylinder', 'plane', 'line', 'model', 'group', 'light', 'cone', 'torus'],
+            enum: ['box', 'sphere', 'cylinder', 'plane', 'line', 'model', 'group', 'light', 'cone', 'torus', 'sprite'],
           },
           parent: { type: 'string' },
           src: { type: 'string' },
@@ -56,6 +56,17 @@ export const THERSE3D_SCENE_SCHEMA = {
               },
             ],
           },
+          boneRotations: {
+            type: 'object',
+            additionalProperties: {
+              type: 'array',
+              items: { type: 'number' },
+              minItems: 3,
+              maxItems: 4,
+            },
+          },
+          text: { type: 'string' },
+          spotAngle: { type: 'number', minimum: 5, maximum: 85 },
           from: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
           to: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
           kind: { type: 'string', enum: ['point', 'directional', 'spot'] },
@@ -210,7 +221,7 @@ export class Schema {
     const materials = Object.keys(MATERIAL_PRESETS).join(', ');
     const lines = [
       'therse3d AI-Native WebGPU 3D Engine',
-      'Primitives: box, sphere, cylinder, plane, cone, torus, line, model, group, light',
+      'Primitives: box, sphere, cylinder, plane, cone, torus, sprite (billboard/text), line, model, group, light',
       `Materials: ${materials}`,
       'Hierarchy & Layout: parent, on (entityId|"floor"), beside (entityId + side: left|right|front|back), inside (entityId), avoidOverlap, align, margin, offset [dx,dy,dz], lookAt, layouts (grid|ring|row)',
       'Expressions & Morphs: morphWeights ({ [blendshapeName]: 0..1 } or number[]) on glTF/model entities with morphTargets, smoothly animated via transition',
