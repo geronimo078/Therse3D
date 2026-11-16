@@ -13,11 +13,12 @@
 - **Zero-Dependency Core:** Pure TypeScript + WGSL with zero runtime dependencies.
 - **WebGPU-First Instanced PBR Renderer:** Cook-Torrance PBR shading, 3-point studio lighting, hemisphere ambient, 2048px directional shadow mapping, alpha-blended transparent pass, `texture_2d_array` albedo textures (`app.loadTexture()` / `app.registerTexture()`), ACES filmic tone mapping, 4x MSAA, and automatic GPU instancing per geometry type (`Box`, `Sphere`, `Cylinder`, `Plane`, `Line`, `Cone`, `Torus`, `Model`, `Group`, `Light`).
 - **Volumetric Atmosphere & God Rays (`app.setVolumetric()`):** Ray-marched volumetric fog, planar and spherical cloud layers (`volumetric.wgsl`), sun scattering, and directional god rays.
-- **Data-Oriented ECS (`WorldStore`):** Contiguous `Float32Array` / `Uint8Array` buffers (`positions`, `rotations`, `scales`, `modelMatrices`, `colors`, `pbrParams`, `boundsMin`, `boundsMax`, `dirtyFlags`) with free-list ID recycling and zero-allocation render-loop updates.
+- **Data-Oriented ECS (`WorldStore`):** Contiguous `Float32Array` / `Uint8Array` buffers (`positions`, `rotations`, `scales`, `modelMatrices`, `colors`, `pbrParams`, `morphWeights`, `boundsMin`, `boundsMax`, `dirtyFlags`) with free-list ID recycling and zero-allocation render-loop updates.
+- **glTF 2.0 Morph Targets / Blendshapes (`GltfLoader` & `morphWeights`):** Expressive 3D faces and avatars via `.glb` `targets` (`POSITION` + `NORMAL` deltas, `extras.targetNames`), semantic `morphWeights` (`{ smile: 0.85, blink: 0.1 }`), smoothstep `transition` tweening, and per-entity GPU vertex buffer updates.
 - **Relative Spatial Layout (`SpatialLayout`):** Place objects relative to each other (`on`, `beside`, `ring`, `grid`, `avoidOverlap`, `align`, `margin`, `offset`, `lookAt`) with topological sorting instead of manual coordinate math.
 - **Declarative `app.sync()`, `app.patch()`, `app.undo()` & Auto-Healing:** Idempotent JSON scene synchronization and partial patching with diffing, smoothstep auto-tweening, undo history, and structured `warnings[]` instead of runtime crashes.
 - **Bidirectional AI Perception:**
-  - `app.describe()` & `app.pick()` — Token-efficient spatial graph with frustum visibility, `screenRegion`, `screenCoverage`, spatial relations (`on`, `near`, `collidingWith`), raycast picking, and automatic warnings.
+  - `app.describe()` & `app.pick()` — Token-efficient spatial graph with frustum visibility, `screenRegion`, `screenCoverage`, spatial relations (`on`, `near`, `collidingWith`), available `morphTargets` / active `morphWeights`, raycast picking, and automatic warnings.
   - `app.snapshot()` — On-demand Multiple Render Targets (MRT) capture for `rgb`, `annotated` (2D bounding boxes + `#id` tags), `depth` (`r32float`), and `ids` (`r32uint`).
 - **LLM & Agent Integration:** `THERSE3D_SCENE_SCHEMA`, `THERSE3D_TOOL_DEFINITIONS`, `Engine.getPromptContext()`, `McpBridge`, and a binary glTF 2.0 (`.glb`) loader (`GltfLoader`).
 

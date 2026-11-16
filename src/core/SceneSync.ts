@@ -1,6 +1,6 @@
 import { quat } from './Math';
 import { SpatialLayout, type SceneLayoutGroup, type SpatialPlacement } from './SpatialLayout';
-import { DirtyFlag, GeometryTypeId, LightKindId, type WorldStore } from './WorldStore';
+import { DirtyFlag, GeometryTypeId, LightKindId, MAX_MORPH_TARGETS, type WorldStore } from './WorldStore';
 import { parseColor, resolveMaterial } from '../entities/Materials';
 import { applyLineEndpoints, type GeometryMeshData, type LightKind, type PrimitiveType } from '../entities/Primitives';
 import type { VolumetricConfig } from '../gpu/Renderer';
@@ -37,6 +37,7 @@ export interface SceneSyncNode extends SpatialPlacement {
   to?: [number, number, number];
   url?: string;
   mesh?: GeometryMeshData;
+  morphWeights?: Record<string, number> | number[];
 }
 
 export interface SceneSyncState {
@@ -70,9 +71,16 @@ export interface SceneSyncHooks {
   onCamera?: (camera: SceneSyncCamera, resolveEntityId: (name: string) => number | undefined, warnings: string[]) => void;
   onEntityCreated?: (name: string, entityId: number) => void;
   onEntityRemoved?: (name: string, entityId: number) => void;
-  onModelRef?: (entityId: number, url: string | undefined, mesh: GeometryMeshData | undefined, warnings: string[]) => void;
+  onModelRef?: (
+    entityId: number,
+    url: string | undefined,
+    mesh: GeometryMeshData | undefined,
+    warnings: string[],
+    morphWeights?: Record<string, number> | number[],
+  ) => void;
   onTextureRef?: (entityId: number, texture: string | number, warnings: string[]) => void;
   onVolumetric?: (config: VolumetricConfig) => void;
+  resolveMorphTargetNames?: (entityId: number) => string[] | undefined;
 }
 
 const VALID_TYPE_MAP: Record<string, GeometryTypeId> = {
@@ -141,6 +149,9 @@ export class SceneSync {
   private tweenTargetRot: Float32Array = new Float32Array(0);
   private tweenStartColor: Float32Array = new Float32Array(0);
   private tweenTargetColor: Float32Array = new Float32Array(0);
+  private tweenHasMorph: Uint8Array = new Uint8Array(0);
+  private tweenStartMorph: Float32Array = new Float32Array(0);
+  private tweenTargetMorph: Float32Array = new Float32Array(0);
 
   constructor(store?: WorldStore, layout = new SpatialLayout()) {
     this.store = store;
@@ -173,6 +184,11 @@ export class SceneSync {
     this.tweenTargetRot = growFloat32(this.tweenTargetRot, capacity * 4);
     this.tweenStartColor = growFloat32(this.tweenStartColor, capacity * 4);
     this.tweenTargetColor = growFloat32(this.tweenTargetColor, capacity * 4);
+    const nextHasMorph = new Uint8Array(capacity);
+    nextHasMorph.set(this.tweenHasMorph);
+    this.tweenHasMorph = nextHasMorph;
+    this.tweenStartMorph = growFloat32(this.tweenStartMorph, capacity * MAX_MORPH_TARGETS);
+    this.tweenTargetMorph = growFloat32(this.tweenTargetMorph, capacity * MAX_MORPH_TARGETS);
   }
 
   get canUndo(): boolean {
@@ -363,7 +379,7 @@ export class SceneSync {
       }
 
       if (mappedType === GeometryTypeId.Model) {
-        hooks?.onModelRef?.(entityId, node.url, node.mesh, warnings);
+        hooks?.onModelRef?.(entityId, node.url, node.mesh, warnings, node.morphWeights);
       }
 
       // Light parameters
@@ -505,6 +521,19 @@ export class SceneSync {
       const targetRz = store.rotations[qIdx + 2] ?? 0;
       const targetRw = store.rotations[qIdx + 3] ?? 1;
 
+      const hasMorphUpdate = node.morphWeights !== undefined;
+      const morphBase = entityId * MAX_MORPH_TARGETS;
+      if (hasMorphUpdate) {
+        if (!isNew && transition > 0) {
+          this.tweenStartMorph.set(
+            store.morphWeights.subarray(morphBase, morphBase + MAX_MORPH_TARGETS),
+            morphBase,
+          );
+        }
+        const targetNames = hooks?.resolveMorphTargetNames?.(entityId) ?? [];
+        applyMorphWeightsToStore(store, entityId, node.morphWeights!, targetNames, warnings, node.id);
+      }
+
       if (!isNew && transition > 0) {
         // Schedule zero-allocation tween from previous state to target state
         this.startTween(
@@ -517,6 +546,19 @@ export class SceneSync {
           prevCr, prevCg, prevCb, prevCa,
           targetColor[0], targetColor[1], targetColor[2], targetColor[3],
         );
+        if (hasMorphUpdate) {
+          this.tweenTargetMorph.set(
+            store.morphWeights.subarray(morphBase, morphBase + MAX_MORPH_TARGETS),
+            morphBase,
+          );
+          store.morphWeights.set(
+            this.tweenStartMorph.subarray(morphBase, morphBase + MAX_MORPH_TARGETS),
+            morphBase,
+          );
+          this.tweenHasMorph[entityId] = 1;
+        } else {
+          this.tweenHasMorph[entityId] = 0;
+        }
         // Restore start state for frame 0 of tween
         store.positions[pIdx] = prevPx;
         store.positions[pIdx + 1] = prevPy;
@@ -609,6 +651,7 @@ export class SceneSync {
   private cancelTween(id: number): void {
     if (id < this.tweenCapacity && (this.tweenDuration[id] ?? 0) > 0) {
       this.tweenDuration[id] = 0;
+      this.tweenHasMorph[id] = 0;
       this.tweenActiveCount = Math.max(0, this.tweenActiveCount - 1);
     }
   }
@@ -665,10 +708,57 @@ export class SceneSync {
 
       store.markDirty(id, DirtyFlag.Transform | DirtyFlag.Bounds);
 
+      if (this.tweenHasMorph[id] === 1) {
+        const mBase = id * MAX_MORPH_TARGETS;
+        const mCount = Math.min(MAX_MORPH_TARGETS, store.morphTargetCounts[id] || MAX_MORPH_TARGETS);
+        for (let m = 0; m < mCount; m++) {
+          const sw = this.tweenStartMorph[mBase + m] ?? 0;
+          const tw = this.tweenTargetMorph[mBase + m] ?? 0;
+          store.morphWeights[mBase + m] = sw + (tw - sw) * t;
+        }
+        store.markDirty(id, DirtyFlag.Morph);
+      }
+
       if (rawT >= 1) {
         this.tweenDuration[id] = 0;
+        this.tweenHasMorph[id] = 0;
         this.tweenActiveCount = Math.max(0, this.tweenActiveCount - 1);
       }
+    }
+  }
+}
+
+export function applyMorphWeightsToStore(
+  store: WorldStore,
+  entityId: number,
+  morphWeights: Record<string, number> | number[],
+  targetNames: readonly string[],
+  warnings: string[],
+  label: string,
+): void {
+  if (Array.isArray(morphWeights)) {
+    store.setMorphWeights(entityId, morphWeights);
+    return;
+  }
+
+  if (morphWeights && typeof morphWeights === 'object') {
+    if (targetNames.length === 0) {
+      // Mesh may still be loading asynchronously; Engine will re-apply once loaded.
+      return;
+    }
+    if (targetNames.length > (store.morphTargetCounts[entityId] ?? 0)) {
+      store.morphTargetCounts[entityId] = Math.min(MAX_MORPH_TARGETS, targetNames.length);
+    }
+    for (const [name, rawWeight] of Object.entries(morphWeights)) {
+      const idx = targetNames.indexOf(name);
+      if (idx < 0) {
+        warnings.push(
+          `Unknown morphTarget "${name}" on "${label}". Available: [${targetNames.join(', ')}].`,
+        );
+        continue;
+      }
+      const w = sanitizeNum(rawWeight, 0, `${label}.morphWeights.${name}`, warnings);
+      store.setMorphWeight(entityId, idx, w);
     }
   }
 }

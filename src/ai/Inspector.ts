@@ -1,5 +1,5 @@
 import { mat4, type Mat4 } from '../core/Math';
-import { GeometryTypeId, type WorldStore } from '../core/WorldStore';
+import { GeometryTypeId, MAX_MORPH_TARGETS, type WorldStore } from '../core/WorldStore';
 
 export type ScreenRegion =
   | 'center'
@@ -34,6 +34,8 @@ export interface EntityDescription {
   /** Normalized viewport box [xMin, yMin, xMax, yMax] in 0..1 */
   screenBox: [number, number, number, number];
   relations: EntityRelations;
+  morphTargets?: string[];
+  morphWeights?: Record<string, number>;
 }
 
 export interface SuggestedFix {
@@ -68,6 +70,7 @@ export interface SceneDescription {
 export interface DescribeContext {
   viewProjMatrix?: Float32Array;
   resolveName?: (entityId: number) => string | undefined;
+  resolveMorphTargetNames?: (entityId: number) => string[] | undefined;
 }
 
 const EPSILON = 1e-3;
@@ -177,6 +180,25 @@ export class Inspector {
         }
       }
 
+      const morphTargetNames = context.resolveMorphTargetNames?.(id);
+      let activeMorphWeights: Record<string, number> | undefined;
+      if (morphTargetNames && morphTargetNames.length > 0) {
+        const mBase = id * MAX_MORPH_TARGETS;
+        const mCount = Math.min(morphTargetNames.length, MAX_MORPH_TARGETS);
+        const weightsObj: Record<string, number> = {};
+        let hasActive = false;
+        for (let m = 0; m < mCount; m++) {
+          const w = store.morphWeights[mBase + m] ?? 0;
+          if (Math.abs(w) > 1e-4) {
+            weightsObj[morphTargetNames[m]!] = Number(w.toFixed(3));
+            hasActive = true;
+          }
+        }
+        if (hasActive) {
+          activeMorphWeights = weightsObj;
+        }
+      }
+
       entities.push({
         id: name,
         entityId: id,
@@ -187,6 +209,8 @@ export class Inspector {
         screenCoverage: proj.screenCoverage,
         screenBox: proj.screenBox,
         relations,
+        ...(morphTargetNames && morphTargetNames.length > 0 ? { morphTargets: morphTargetNames } : {}),
+        ...(activeMorphWeights ? { morphWeights: activeMorphWeights } : {}),
       });
     }
 

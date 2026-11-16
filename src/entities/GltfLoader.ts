@@ -1,10 +1,12 @@
 import type { MaterialDefinition } from './Materials';
+import type { MorphTargetData } from './Primitives';
 
 export interface GltfParsedMesh {
   name: string;
   vertices: Float32Array;
   indices: Uint32Array;
   material: MaterialDefinition;
+  morphTargets?: MorphTargetData[];
 }
 
 export interface GltfLoadResult {
@@ -16,10 +18,14 @@ export interface GltfLoadResult {
 interface GltfJson {
   meshes?: Array<{
     name?: string;
+    extras?: {
+      targetNames?: string[];
+    };
     primitives?: Array<{
       attributes?: Record<string, number>;
       indices?: number;
       material?: number;
+      targets?: Array<Record<string, number>>;
     }>;
   }>;
   materials?: Array<{
@@ -172,11 +178,46 @@ export class GltfLoader {
           materialId: 0,
         };
 
+        let morphTargets: MorphTargetData[] | undefined;
+        if (Array.isArray(prim.targets) && prim.targets.length > 0) {
+          const targetNames = mesh.extras?.targetNames;
+          const parsedTargets: MorphTargetData[] = [];
+          for (let t = 0; t < prim.targets.length; t++) {
+            const target = prim.targets[t];
+            if (!target) continue;
+            const posDeltaIdx = target['POSITION'];
+            if (posDeltaIdx === undefined) continue;
+            const posDeltas = readFloatAccessor(accessors, bufferViews, binChunk, posDeltaIdx, 3);
+            if (!posDeltas || posDeltas.length !== vertCount * 3) continue;
+
+            const normDeltaIdx = target['NORMAL'];
+            const normDeltas =
+              normDeltaIdx !== undefined
+                ? readFloatAccessor(accessors, bufferViews, binChunk, normDeltaIdx, 3)
+                : null;
+
+            const targetName =
+              Array.isArray(targetNames) && typeof targetNames[t] === 'string' && targetNames[t]!.trim() !== ''
+                ? targetNames[t]!
+                : `target_${t}`;
+
+            parsedTargets.push({
+              name: targetName,
+              positionDeltas: posDeltas,
+              normalDeltas: normDeltas && normDeltas.length === vertCount * 3 ? normDeltas : null,
+            });
+          }
+          if (parsedTargets.length > 0) {
+            morphTargets = parsedTargets;
+          }
+        }
+
         meshes.push({
           name: mesh.name ?? `mesh_${m}_${p}`,
           vertices,
           indices,
           material,
+          ...(morphTargets ? { morphTargets } : {}),
         });
       }
     }

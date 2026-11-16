@@ -1,4 +1,4 @@
-import { DirtyFlag, type WorldStore } from '../core/WorldStore';
+import { DirtyFlag, MAX_MORPH_TARGETS, type WorldStore } from '../core/WorldStore';
 
 export type Vec3Like = readonly [number, number, number] | Float32Array;
 export type Vec4Like = readonly [number, number, number, number] | Float32Array;
@@ -131,6 +131,22 @@ export class EntityHandle {
 
   set texture(textureId: number) {
     this.store.setTextureId(this.id, textureId);
+  }
+
+  get morphWeights(): Float32Array {
+    const base = this.id * MAX_MORPH_TARGETS;
+    const count = Math.max(0, Math.min(MAX_MORPH_TARGETS, this.store.morphTargetCounts[this.id] ?? 0));
+    return this.store.morphWeights.subarray(base, base + count);
+  }
+
+  setMorphWeight(index: number, weight: number): this {
+    this.store.setMorphWeight(this.id, index, weight);
+    return this;
+  }
+
+  setMorphWeights(weights: ArrayLike<number>): this {
+    this.store.setMorphWeights(this.id, weights);
+    return this;
   }
 
   destroy(): void {

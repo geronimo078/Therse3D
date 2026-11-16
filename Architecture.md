@@ -141,8 +141,9 @@ All transform and material data live in contiguous `TypedArrays` to avoid CPU ca
 | `modelMatrices` | `Float32Array` | `16 * MAX` | Precomputed 4x4 matrices (direct GPU upload) |
 | `colors` | `Float32Array` | `4 * MAX` | `[r, g, b, a]` linear color space |
 | `pbrParams` | `Float32Array` | `4 * MAX` | `[metalness, roughness, emissive, materialId]` |
+| `morphWeights` | `Float32Array` | `64 * MAX` | Blendshape / morph target weights (`MAX_MORPH_TARGETS = 64`) |
 | `boundsMin` / `Max` | `Float32Array` | `3 * MAX` | AABB bounding boxes for `SpatialLayout` & frustum checks |
-| `dirtyFlags` | `Uint8Array` | `1 * MAX` | Marks modified entities for selective GPU updates |
+| `dirtyFlags` | `Uint8Array` | `1 * MAX` | Marks modified entities (`Transform`, `Material`, `Geometry`, `Bounds`, `Morph`) for selective GPU updates |
 
 ---
 
@@ -250,5 +251,5 @@ All transform and material data live in contiguous `TypedArrays` to avoid CPU ca
       3. `therse_snapshot` → returns the `annotated` RGB image for multimodal VLM self-verification.
       4. `therse_camera_focus` → focuses the camera on an `entityId` or view (`'top'`, `'front'`, `'isometric'`).
   * **`GltfLoader.ts`:**
-    * Minimal `.glb` (Binary glTF 2.0) loader that loads meshes and PBR materials directly into `WorldStore` & `BufferManager`, allowing complex 3D assets via `{ type: 'model', src: 'robot.glb', on: 'floor' }` in `app.sync()`.
+    * Minimal `.glb` (Binary glTF 2.0) loader that loads meshes, PBR materials, and morph targets (`targets` `POSITION`/`NORMAL` deltas + `extras.targetNames`) directly into `WorldStore` & `BufferManager`, allowing expressive 3D assets and AI avatars via `{ type: 'model', url: 'avatar.glb', morphWeights: { smile: 0.8 } }` in `app.sync()` / `app.patch()`.
 * **Acceptance Criterion:** A local LLM (e.g., Qwen or Gemma via Ollama) can autonomously build an error-free 3D scene in a closed loop (`sync` → `describe` → `snapshot` → fix) using the exported tool schema.

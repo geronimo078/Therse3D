@@ -1,6 +1,6 @@
 import type { GPUDeviceContext } from './Device';
 import { mat4 } from '../core/Math';
-import { GeometryTypeId, type WorldStore } from '../core/WorldStore';
+import { DirtyFlag, GeometryTypeId, MAX_MORPH_TARGETS, type WorldStore } from '../core/WorldStore';
 import { BufferManager } from './BufferManager';
 import {
   createBoxGeometry,
@@ -11,6 +11,7 @@ import {
   createSphereGeometry,
   createTorusGeometry,
   type GeometryMeshData,
+  type MorphTargetData,
 } from '../entities/Primitives';
 import type { EnginePreset } from '../core/Engine';
 import type { Camera } from '../controls/OrbitControls';
@@ -49,6 +50,13 @@ interface GeometryGpuMesh {
   indexBuffer: GPUBuffer;
   indexCount: number;
   indexFormat: GPUIndexFormat;
+  morph?: {
+    baseVertices: Float32Array;
+    morphedVertices: Float32Array;
+    morphTargets: MorphTargetData[];
+    targetNames: string[];
+    perEntityBuffers: Map<number, GPUBuffer>;
+  };
 }
 
 interface PresetLighting {
@@ -489,13 +497,29 @@ export class Renderer {
     const id = this.nextCustomMeshId++;
     const vertexBuffer = this.buffers.createVertexBuffer(data.vertices, `${label}-${id}-vb`);
     const indexBuffer = this.buffers.createIndexBuffer(data.indices, `${label}-${id}-ib`);
+    const hasMorphs = Array.isArray(data.morphTargets) && data.morphTargets.length > 0;
     this.customMeshes.set(id, {
       vertexBuffer,
       indexBuffer,
       indexCount: data.indices.length,
       indexFormat: data.indices instanceof Uint32Array ? 'uint32' : 'uint16',
+      ...(hasMorphs
+        ? {
+            morph: {
+              baseVertices: new Float32Array(data.vertices),
+              morphedVertices: new Float32Array(data.vertices),
+              morphTargets: data.morphTargets!,
+              targetNames: data.morphTargets!.map((t) => t.name),
+              perEntityBuffers: new Map<number, GPUBuffer>(),
+            },
+          }
+        : {}),
     });
     return id;
+  }
+
+  getMeshMorphTargetNames(meshId: number): string[] {
+    return this.customMeshes.get(meshId)?.morph?.targetNames ?? [];
   }
 
   unloadMesh(meshId: number): void {
@@ -503,6 +527,12 @@ export class Renderer {
     if (!mesh) return;
     this.buffers.destroyBuffer(mesh.vertexBuffer);
     this.buffers.destroyBuffer(mesh.indexBuffer);
+    if (mesh.morph) {
+      for (const vb of mesh.morph.perEntityBuffers.values()) {
+        this.buffers.destroyBuffer(vb);
+      }
+      mesh.morph.perEntityBuffers.clear();
+    }
     this.customMeshes.delete(meshId);
   }
 
@@ -856,6 +886,7 @@ export class Renderer {
 
     this.ensureRenderTargets(width, height);
     this.ensureStorageCapacity(this.store.capacity);
+    this.updateMorphedMeshes();
 
     const presetCfg = PRESETS[this.preset];
     const u = this.uniformScratch;
@@ -1232,7 +1263,8 @@ export class Renderer {
         if (meshId < 0) continue;
         const mesh = this.customMeshes.get(meshId);
         if (!mesh) continue;
-        pass.setVertexBuffer(0, mesh.vertexBuffer);
+        const vb = mesh.morph?.perEntityBuffers.get(entityId) ?? mesh.vertexBuffer;
+        pass.setVertexBuffer(0, vb);
         pass.setIndexBuffer(mesh.indexBuffer, mesh.indexFormat);
         pass.drawIndexed(mesh.indexCount, 1, 0, 0, slot);
       }
@@ -1619,6 +1651,91 @@ export class Renderer {
       if (rgbReadBuf) this.buffers.destroyBuffer(rgbReadBuf);
       if (idReadBuf) this.buffers.destroyBuffer(idReadBuf);
       if (depthReadBuf) this.buffers.destroyBuffer(depthReadBuf);
+    }
+  }
+
+  private updateMorphedMeshes(): void {
+    if (this.customMeshes.size === 0) return;
+
+    const store = this.store;
+    const n = store.highWaterMark;
+    const alive = store.alive;
+    const types = store.geometryTypes;
+    const dirty = store.dirtyFlags;
+    const meshIds = store.meshIds;
+    const weights = store.morphWeights;
+
+    for (let id = 0; id < n; id++) {
+      if (alive[id] === 0 || types[id] !== GeometryTypeId.Model) continue;
+      if (((dirty[id] ?? 0) & DirtyFlag.Morph) === 0) continue;
+
+      const meshId = meshIds[id] ?? -1;
+      const mesh = meshId >= 0 ? this.customMeshes.get(meshId) : undefined;
+      if (!mesh || !mesh.morph) {
+        dirty[id] = (dirty[id] ?? 0) & ~DirtyFlag.Morph;
+        continue;
+      }
+
+      const { baseVertices, morphedVertices, morphTargets, perEntityBuffers } = mesh.morph;
+      morphedVertices.set(baseVertices);
+
+      const vertCount = (baseVertices.length / 8) | 0;
+      const targetCount = Math.min(morphTargets.length, MAX_MORPH_TARGETS);
+      const wBase = id * MAX_MORPH_TARGETS;
+      let normalsModified = false;
+
+      for (let t = 0; t < targetCount; t++) {
+        const w = weights[wBase + t] ?? 0;
+        if (Math.abs(w) < 1e-6) continue;
+
+        const target = morphTargets[t]!;
+        const pDeltas = target.positionDeltas;
+        const nDeltas = target.normalDeltas;
+
+        for (let v = 0; v < vertCount; v++) {
+          const vOff = v * 8;
+          const dOff = v * 3;
+          morphedVertices[vOff] = (morphedVertices[vOff] ?? 0) + (pDeltas[dOff] ?? 0) * w;
+          morphedVertices[vOff + 1] = (morphedVertices[vOff + 1] ?? 0) + (pDeltas[dOff + 1] ?? 0) * w;
+          morphedVertices[vOff + 2] = (morphedVertices[vOff + 2] ?? 0) + (pDeltas[dOff + 2] ?? 0) * w;
+        }
+
+        if (nDeltas) {
+          normalsModified = true;
+          for (let v = 0; v < vertCount; v++) {
+            const vOff = v * 8;
+            const dOff = v * 3;
+            morphedVertices[vOff + 3] = (morphedVertices[vOff + 3] ?? 0) + (nDeltas[dOff] ?? 0) * w;
+            morphedVertices[vOff + 4] = (morphedVertices[vOff + 4] ?? 0) + (nDeltas[dOff + 1] ?? 0) * w;
+            morphedVertices[vOff + 5] = (morphedVertices[vOff + 5] ?? 0) + (nDeltas[dOff + 2] ?? 0) * w;
+          }
+        }
+      }
+
+      if (normalsModified) {
+        for (let v = 0; v < vertCount; v++) {
+          const vOff = v * 8;
+          const nx = morphedVertices[vOff + 3] ?? 0;
+          const ny = morphedVertices[vOff + 4] ?? 1;
+          const nz = morphedVertices[vOff + 5] ?? 0;
+          const len = Math.hypot(nx, ny, nz);
+          if (len > 1e-6) {
+            morphedVertices[vOff + 3] = nx / len;
+            morphedVertices[vOff + 4] = ny / len;
+            morphedVertices[vOff + 5] = nz / len;
+          }
+        }
+      }
+
+      let vb = perEntityBuffers.get(id);
+      if (!vb) {
+        vb = this.buffers.createVertexBuffer(morphedVertices, `morph-${meshId}-entity-${id}-vb`);
+        perEntityBuffers.set(id, vb);
+      } else {
+        this.gpu.device.queue.writeBuffer(vb, 0, morphedVertices as Float32Array<ArrayBuffer>);
+      }
+
+      dirty[id] = (dirty[id] ?? 0) & ~DirtyFlag.Morph;
     }
   }
 

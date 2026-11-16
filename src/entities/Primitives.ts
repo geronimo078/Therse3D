@@ -31,6 +31,7 @@ export interface PrimitiveOptions extends SpatialPlacement {
   to?: [number, number, number];
   url?: string;
   mesh?: GeometryMeshData;
+  morphWeights?: Record<string, number> | number[];
 }
 
 export interface PrimitiveDescriptor extends PrimitiveOptions {
@@ -38,10 +39,19 @@ export interface PrimitiveDescriptor extends PrimitiveOptions {
   readonly type: PrimitiveType;
 }
 
+export interface MorphTargetData {
+  name: string;
+  /** Delta positions: 3 floats per vertex [dx, dy, dz, ...] */
+  positionDeltas: Float32Array;
+  /** Optional delta normals: 3 floats per vertex [dnx, dny, dnz, ...] */
+  normalDeltas?: Float32Array | null;
+}
+
 export interface GeometryMeshData {
   /** Interleaved: [px, py, pz, nx, ny, nz, u, v] = 8 floats/vertex */
   vertices: Float32Array;
   indices: Uint16Array | Uint32Array;
+  morphTargets?: MorphTargetData[];
 }
 
 function makeFactory(type: PrimitiveType) {

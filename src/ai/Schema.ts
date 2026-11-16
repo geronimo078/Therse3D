@@ -44,6 +44,18 @@ export const THERSE3D_SCENE_SCHEMA = {
           parent: { type: 'string' },
           src: { type: 'string' },
           url: { type: 'string' },
+          morphWeights: {
+            oneOf: [
+              {
+                type: 'object',
+                additionalProperties: { type: 'number', minimum: -2, maximum: 2 },
+              },
+              {
+                type: 'array',
+                items: { type: 'number', minimum: -2, maximum: 2 },
+              },
+            ],
+          },
           from: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
           to: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
           kind: { type: 'string', enum: ['point', 'directional', 'spot'] },
@@ -201,6 +213,7 @@ export class Schema {
       'Primitives: box, sphere, cylinder, plane, cone, torus, line, model, group, light',
       `Materials: ${materials}`,
       'Hierarchy & Layout: parent, on (entityId|"floor"), beside (entityId + side: left|right|front|back), inside (entityId), avoidOverlap, align, margin, offset [dx,dy,dz], lookAt, layouts (grid|ring|row)',
+      'Expressions & Morphs: morphWeights ({ [blendshapeName]: 0..1 } or number[]) on glTF/model entities with morphTargets, smoothly animated via transition',
       'Presets: studio, outdoor, dark-ui, cad-blueprint, minimal',
       'Tools: therse_sync_scene, therse_patch_scene, therse_undo, therse_inspect, therse_snapshot, therse_camera_focus, therse_pick',
     ];

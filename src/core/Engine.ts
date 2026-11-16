@@ -1,6 +1,7 @@
-import { GeometryTypeId, LightKindId, WorldStore } from './WorldStore';
+import { DirtyFlag, GeometryTypeId, LightKindId, WorldStore } from './WorldStore';
 import { SpatialLayout } from './SpatialLayout';
 import {
+  applyMorphWeightsToStore,
   SceneSync,
   type ScenePatchState,
   type SceneSyncCamera,
@@ -235,7 +236,18 @@ export class Engine {
     }
 
     if (descriptor.type === 'model') {
-      this.applyModelRef(id, descriptor.url, descriptor.mesh);
+      this.applyModelRef(id, descriptor.url, descriptor.mesh, undefined, descriptor.morphWeights);
+      if (descriptor.morphWeights !== undefined) {
+        const targetNames = this.renderer.getMeshMorphTargetNames(this.store.meshIds[id] ?? -1);
+        applyMorphWeightsToStore(
+          this.store,
+          id,
+          descriptor.morphWeights,
+          targetNames,
+          [],
+          descriptor.id ?? `entity-${id}`,
+        );
+      }
     }
 
     this.entitiesById.set(id, handle);
@@ -324,14 +336,17 @@ export class Engine {
         this.entitiesById.delete(entityId);
         this.entitiesByName.delete(name);
       },
-      onModelRef: (entityId, url, mesh, warnings) => {
-        this.applyModelRef(entityId, url, mesh, warnings);
+      onModelRef: (entityId, url, mesh, warnings, morphWeights) => {
+        this.applyModelRef(entityId, url, mesh, warnings, morphWeights);
       },
       onTextureRef: (entityId, texture, warnings) => {
         this.applyTextureRef(entityId, texture, warnings);
       },
       onVolumetric: (config) => {
         this.setVolumetric(config);
+      },
+      resolveMorphTargetNames: (entityId) => {
+        return this.renderer.getMeshMorphTargetNames(this.store.meshIds[entityId] ?? -1);
       },
     };
   }
@@ -406,7 +421,11 @@ export class Engine {
       throw new Error(`No renderable mesh found in glTF model "${url}": ${result.warnings.join('; ')}`);
     }
     const meshId = this.renderer.registerMesh(
-      { vertices: firstMesh.vertices, indices: firstMesh.indices },
+      {
+        vertices: firstMesh.vertices,
+        indices: firstMesh.indices,
+        ...(firstMesh.morphTargets ? { morphTargets: firstMesh.morphTargets } : {}),
+      },
       firstMesh.name || url,
     );
     this.modelCache.set(url, meshId);
@@ -418,9 +437,16 @@ export class Engine {
     url?: string,
     mesh?: GeometryMeshData,
     warnings?: string[],
+    pendingMorphWeights?: Record<string, number> | number[],
   ): void {
     if (mesh) {
-      this.store.meshIds[entityId] = this.renderer.registerMesh(mesh, `entity-${entityId}-mesh`);
+      const meshId = this.renderer.registerMesh(mesh, `entity-${entityId}-mesh`);
+      this.store.meshIds[entityId] = meshId;
+      const names = this.renderer.getMeshMorphTargetNames(meshId);
+      if (names.length > 0) {
+        this.store.morphTargetCounts[entityId] = Math.min(64, names.length);
+        this.store.markDirty(entityId, DirtyFlag.Morph);
+      }
       return;
     }
     if (!url) return;
@@ -428,6 +454,11 @@ export class Engine {
     const cached = this.modelCache.get(url);
     if (cached !== undefined) {
       this.store.meshIds[entityId] = cached;
+      const names = this.renderer.getMeshMorphTargetNames(cached);
+      if (names.length > 0) {
+        this.store.morphTargetCounts[entityId] = Math.min(64, names.length);
+        this.store.markDirty(entityId, DirtyFlag.Morph);
+      }
       return;
     }
 
@@ -435,6 +466,21 @@ export class Engine {
       .then((meshId) => {
         if (this.store.alive[entityId] === 1) {
           this.store.meshIds[entityId] = meshId;
+          const names = this.renderer.getMeshMorphTargetNames(meshId);
+          if (names.length > 0) {
+            this.store.morphTargetCounts[entityId] = Math.min(64, names.length);
+            if (pendingMorphWeights !== undefined) {
+              applyMorphWeightsToStore(
+                this.store,
+                entityId,
+                pendingMorphWeights,
+                names,
+                warnings ?? [],
+                `entity-${entityId}`,
+              );
+            }
+            this.store.markDirty(entityId, DirtyFlag.Morph);
+          }
         }
       })
       .catch((err) => {
@@ -521,6 +567,7 @@ export class Engine {
     return this.inspector.describe({
       viewProjMatrix: vp,
       resolveName: (id) => this.entitiesById.get(id)?.name,
+      resolveMorphTargetNames: (id) => this.renderer.getMeshMorphTargetNames(this.store.meshIds[id] ?? -1),
     });
   }
 

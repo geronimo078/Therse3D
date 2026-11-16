@@ -4,6 +4,7 @@ import { aabb, mat4, quat } from './Math';
  * ECS Data-Layer auf Basis flacher TypedArrays + Dirty-Flags.
  */
 export const MAX_ENTITIES_DEFAULT = 10_000;
+export const MAX_MORPH_TARGETS = 64;
 
 export const enum DirtyFlag {
   None = 0,
@@ -11,6 +12,7 @@ export const enum DirtyFlag {
   Material = 1 << 1,
   Geometry = 1 << 2,
   Bounds = 1 << 3,
+  Morph = 1 << 4,
 }
 
 export const enum GeometryTypeId {
@@ -54,6 +56,8 @@ export class WorldStore {
   parentIds: Int32Array;
   meshIds: Int32Array;
   textureIds: Uint16Array;
+  morphWeights: Float32Array;
+  morphTargetCounts: Uint8Array;
 
   private readonly freeList: number[] = [];
   private readonly localMatScratch = new Float32Array(16);
@@ -79,6 +83,8 @@ export class WorldStore {
     this.meshIds = new Int32Array(this.capacity);
     this.meshIds.fill(-1);
     this.textureIds = new Uint16Array(this.capacity);
+    this.morphWeights = new Float32Array(this.capacity * MAX_MORPH_TARGETS);
+    this.morphTargetCounts = new Uint8Array(this.capacity);
     this.updatedThisPass = new Uint8Array(this.capacity);
   }
 
@@ -127,6 +133,8 @@ export class WorldStore {
     this.parentIds[id] = -1;
     this.meshIds[id] = -1;
     this.textureIds[id] = 0;
+    this.morphTargetCounts[id] = 0;
+    this.morphWeights.fill(0, id * MAX_MORPH_TARGETS, (id + 1) * MAX_MORPH_TARGETS);
 
     mat4.identity(this.modelMatrices, id * 16);
     aabb.fromCenterHalfExtents(this.boundsMin, this.boundsMax, pIdx, 0, 0, 0, 0.5, 0.5, 0.5);
@@ -144,6 +152,8 @@ export class WorldStore {
     this.parentIds[id] = -1;
     this.meshIds[id] = -1;
     this.textureIds[id] = 0;
+    this.morphTargetCounts[id] = 0;
+    this.morphWeights.fill(0, id * MAX_MORPH_TARGETS, (id + 1) * MAX_MORPH_TARGETS);
     this.count--;
     this.freeList.push(id);
   }
@@ -312,6 +322,34 @@ export class WorldStore {
     this.dirtyFlags[id] = (this.dirtyFlags[id] ?? 0) | DirtyFlag.Material;
   }
 
+  setMorphWeight(id: number, targetIndex: number, weight: number): void {
+    if (id < 0 || id >= this.highWaterMark || this.alive[id] === 0) return;
+    if (targetIndex < 0 || targetIndex >= MAX_MORPH_TARGETS) return;
+    const safe = Number.isFinite(weight) ? Math.max(-2, Math.min(2, weight)) : 0;
+    this.morphWeights[id * MAX_MORPH_TARGETS + targetIndex] = safe;
+    if (targetIndex + 1 > (this.morphTargetCounts[id] ?? 0)) {
+      this.morphTargetCounts[id] = targetIndex + 1;
+    }
+    this.dirtyFlags[id] = (this.dirtyFlags[id] ?? 0) | DirtyFlag.Morph;
+  }
+
+  setMorphWeights(id: number, weights: ArrayLike<number>): void {
+    if (id < 0 || id >= this.highWaterMark || this.alive[id] === 0) return;
+    const count = Math.min(MAX_MORPH_TARGETS, weights.length);
+    const base = id * MAX_MORPH_TARGETS;
+    for (let i = 0; i < count; i++) {
+      const w = weights[i] ?? 0;
+      this.morphWeights[base + i] = Number.isFinite(w) ? Math.max(-2, Math.min(2, w)) : 0;
+    }
+    for (let i = count; i < MAX_MORPH_TARGETS; i++) {
+      this.morphWeights[base + i] = 0;
+    }
+    if (count > (this.morphTargetCounts[id] ?? 0)) {
+      this.morphTargetCounts[id] = count;
+    }
+    this.dirtyFlags[id] = (this.dirtyFlags[id] ?? 0) | DirtyFlag.Morph;
+  }
+
   private grow(): void {
     const nextCap = this.capacity * 2;
     this.positions = growFloat32(this.positions, nextCap * 3);
@@ -341,6 +379,9 @@ export class WorldStore {
     const nextTextureIds = new Uint16Array(nextCap);
     nextTextureIds.set(this.textureIds);
     this.textureIds = nextTextureIds;
+
+    this.morphWeights = growFloat32(this.morphWeights, nextCap * MAX_MORPH_TARGETS);
+    this.morphTargetCounts = growUint8(this.morphTargetCounts, nextCap);
 
     this.updatedThisPass = new Uint8Array(nextCap);
 
