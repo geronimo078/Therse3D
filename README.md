@@ -10,8 +10,9 @@
 
 ## Features
 
-- **Zero-Dependency Core:** Pure TypeScript + WGSL with zero runtime dependencies.
+- **Zero-Dependency Core:** Pure TypeScript + WGSL with zero runtime dependencies and a default **30 FPS** render cap (`maxFps` / `app.setMaxFps(fps)`, `0` = uncapped) to prevent system overload.
 - **WebGPU-First Instanced PBR Renderer:** Cook-Torrance PBR shading, procedural IBL environment reflections, 3-point studio lighting, dynamic directional/point/spot (`spotAngle`) lights, 2048px directional shadow mapping, alpha-blended transparent pass, `texture_2d_array` albedo textures (`app.loadTexture()` / `app.registerTexture()`), ACES filmic tone mapping, 4x MSAA, automatic **Low-Spec Mode** (`quality: 'auto' | 'high' | 'low'`) with FXAA (`fxaa.wgsl`), and GPU instancing (`Box`, `Sphere`, `Cylinder`, `Plane`, `Line`, `Cone`, `Torus`, `Sprite` / `Text`, `Model`, `Group`, `Light`).
+- **Optional Tile-Mesh Plugin (`TileMeshPlugin`):** Georeferenced `spherical` & `planar` terrain tiles with camera-distance LOD, seamless cross-border normals & skirts, exact rendered-triangle `sampleSurface(lon, lat)`, LOD-persistent `deformRegion()` terrain sculpting, and deterministic GPU buffer lifecycle.
 - **Volumetric Atmosphere & God Rays (`app.setVolumetric()`):** Ray-marched volumetric fog, planar and spherical cloud layers (`volumetric.wgsl`), sun scattering, and directional god rays.
 - **Data-Oriented ECS (`WorldStore`):** Contiguous `Float32Array` / `Uint8Array` buffers (`positions`, `rotations`, `scales`, `modelMatrices`, `colors`, `pbrParams`, `morphWeights`, `boundsMin`, `boundsMax`, `dirtyFlags`) with free-list ID recycling and zero-allocation render-loop updates.
 - **glTF 2.0 Avatars — Morph Targets, Skeletal Skinning & Embedded Textures (`GltfLoader`):** Loads `.glb` meshes with embedded `baseColorTexture`, `targets` (`POSITION` + `NORMAL` deltas, `extras.targetNames`), and `skins` (`JOINTS_0`, `WEIGHTS_0`, `inverseBindMatrices`). Control facial expressions via semantic `morphWeights` (`{ smile: 0.85 }`, smoothstep `transition` tweening) and pose skeletons via `boneRotations` (`{ Head: [0.1, 0.3, 0] }`).

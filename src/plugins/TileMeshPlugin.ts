@@ -366,6 +366,7 @@ interface InternalTileState {
   meshData: GeometryMeshData;
   elevations: Float32Array;
   materialMask: Float32Array;
+  deformations: TileDeformOptions[];
   entity: EntityHandle;
   vertexCount: number;
   triangleCount: number;
@@ -533,6 +534,7 @@ export class TileMeshManager {
       existing.meshData = meshData;
       existing.elevations = elevations;
       existing.materialMask = materialMask;
+      existing.deformations = [];
       existing.vertexCount = vertexCount;
       existing.triangleCount = triangleCount;
       return this.toRecord(existing);
@@ -565,6 +567,7 @@ export class TileMeshManager {
       meshData,
       elevations,
       materialMask,
+      deformations: [],
       entity,
       vertexCount,
       triangleCount,
@@ -643,12 +646,56 @@ export class TileMeshManager {
       const targetSegments = this.selectSegmentsForDistance(dist);
       if (targetSegments === state.segments) continue;
 
-      const meshData = this.buildMeshForTile(state.bounds, targetSegments, state.input);
+      const baseSampler = state.input.heightSampler ?? this.defaultHeightSampler;
       const { elevations, materialMask } = this.sampleGridArrays(
         state.bounds,
         targetSegments,
-        state.input.heightSampler ?? this.defaultHeightSampler,
+        baseSampler,
       );
+
+      let meshData: GeometryMeshData;
+      if (state.deformations.length > 0) {
+        for (let d = 0; d < state.deformations.length; d++) {
+          applyDeformToGrid(state.bounds, targetSegments, elevations, materialMask, state.deformations[d]!);
+        }
+        const edgeLen = targetSegments + 1;
+        const b = state.bounds;
+        const lonSpan = Math.max(1e-9, b.maxLon - b.minLon);
+        const latSpan = Math.max(1e-9, b.maxLat - b.minLat);
+        const deformedSampler: TileHeightSampler = (lon, lat) => {
+          if (lon >= b.minLon && lon <= b.maxLon && lat >= b.minLat && lat <= b.maxLat) {
+            const u = Math.max(0, Math.min(1, (lon - b.minLon) / lonSpan));
+            const v = Math.max(0, Math.min(1, (b.maxLat - lat) / latSpan));
+            const fx = u * targetSegments;
+            const fy = v * targetSegments;
+            const ix0 = Math.min(targetSegments - 1, Math.floor(fx));
+            const iy0 = Math.min(targetSegments - 1, Math.floor(fy));
+            const tx = fx - ix0;
+            const ty = fy - iy0;
+            const e00 = elevations[iy0 * edgeLen + ix0] ?? 0;
+            const e10 = elevations[iy0 * edgeLen + ix0 + 1] ?? 0;
+            const e01 = elevations[(iy0 + 1) * edgeLen + ix0] ?? 0;
+            const e11 = elevations[(iy0 + 1) * edgeLen + ix0 + 1] ?? 0;
+            return (e00 * (1 - tx) + e10 * tx) * (1 - ty) + (e01 * (1 - tx) + e11 * tx) * ty;
+          }
+          return this.sampleElevationAtGeo(lon, lat, baseSampler);
+        };
+        meshData = buildTileMeshData({
+          bounds: state.bounds,
+          segments: targetSegments,
+          mode: this.mode,
+          planetRadius: this.planetRadius,
+          planetCenter: this.planetCenter,
+          originGeo: this.originGeo,
+          metersPerDegree: this.metersPerDegree,
+          elevationScale: this.elevationScale,
+          skirtDepth: state.input.skirtDepth ?? this.skirtDepth,
+          heightSampler: deformedSampler,
+        });
+      } else {
+        meshData = this.buildMeshForTile(state.bounds, targetSegments, state.input);
+      }
+
       const { min: worldMin, max: worldMax } = computeMeshBounds(meshData.vertices);
       const newMeshId = this.engine.registerMesh(meshData, `tile-${state.input.id}-lod${targetSegments}`);
       const oldMeshId = state.meshId;
@@ -852,13 +899,6 @@ export class TileMeshManager {
     }
 
     const r = Math.max(1e-5, options.radiusDeg);
-    const mode = options.mode ?? 'add';
-    const falloffMode = options.falloff ?? 'smooth';
-    const delta = options.deltaElevation ?? 0;
-    const targetElev = options.targetElevation ?? 0;
-    const maskVal = options.materialMaskValue;
-    const maskMode = options.materialMaskMode ?? 'set';
-
     const updatedTiles: string[] = [];
     let patchedVertices = 0;
 
@@ -882,60 +922,10 @@ export class TileMeshManager {
         continue;
       }
 
-      const seg = state.segments;
-      const edgeLen = seg + 1;
-      const lonSpan = b.maxLon - b.minLon;
-      const latSpan = b.maxLat - b.minLat;
-
-      let minIx = seg, maxIx = 0, minIy = seg, maxIy = 0;
-      let anyHit = false;
-
-      for (let iy = 0; iy <= seg; iy++) {
-        const lat = b.maxLat - (iy / seg) * latSpan;
-        for (let ix = 0; ix <= seg; ix++) {
-          const lon = b.minLon + (ix / seg) * lonSpan;
-          const dist = Math.hypot(lon - options.lon, lat - options.lat);
-          if (dist > r) continue;
-
-          anyHit = true;
-          if (ix < minIx) minIx = ix;
-          if (ix > maxIx) maxIx = ix;
-          if (iy < minIy) minIy = iy;
-          if (iy > maxIy) maxIy = iy;
-
-          const t = 1 - dist / r;
-          const w = falloffMode === 'linear' ? t : t * t * (3 - 2 * t);
-          const idx = iy * edgeLen + ix;
-          const curH = state.elevations[idx] ?? 0;
-
-          if (mode === 'flatten') {
-            state.elevations[idx] = curH + (targetElev - curH) * w;
-          } else if (mode === 'smooth') {
-            const hL = state.elevations[iy * edgeLen + Math.max(0, ix - 1)] ?? curH;
-            const hR = state.elevations[iy * edgeLen + Math.min(seg, ix + 1)] ?? curH;
-            const hU = state.elevations[Math.max(0, iy - 1) * edgeLen + ix] ?? curH;
-            const hD = state.elevations[Math.min(seg, iy + 1) * edgeLen + ix] ?? curH;
-            const avg = (hL + hR + hU + hD) * 0.25;
-            state.elevations[idx] = curH + (avg - curH) * w;
-          } else {
-            state.elevations[idx] = curH + delta * w;
-          }
-
-          if (maskVal !== undefined) {
-            const curM = state.materialMask[idx] ?? 0;
-            if (maskMode === 'max') {
-              state.materialMask[idx] = Math.max(curM, maskVal * w);
-            } else if (maskMode === 'add') {
-              state.materialMask[idx] = Math.max(0, Math.min(1, curM + maskVal * w));
-            } else {
-              state.materialMask[idx] = curM + (maskVal - curM) * w;
-            }
-          }
-        }
-      }
-
-      if (anyHit) {
-        dirtyTiles.push({ state, minIx, maxIx, minIy, maxIy });
+      const hit = applyDeformToGrid(b, state.segments, state.elevations, state.materialMask, options);
+      if (hit) {
+        state.deformations.push({ ...options });
+        dirtyTiles.push({ state, ...hit });
       }
     }
 
@@ -1133,6 +1123,75 @@ export class TileMeshManager {
       triangleCount: state.triangleCount,
     };
   }
+}
+
+function applyDeformToGrid(
+  bounds: GeoBounds,
+  seg: number,
+  elevations: Float32Array,
+  materialMask: Float32Array,
+  options: TileDeformOptions,
+): { minIx: number; maxIx: number; minIy: number; maxIy: number } | null {
+  const r = Math.max(1e-5, options.radiusDeg);
+  const mode = options.mode ?? 'add';
+  const falloffMode = options.falloff ?? 'smooth';
+  const delta = options.deltaElevation ?? 0;
+  const targetElev = options.targetElevation ?? 0;
+  const maskVal = options.materialMaskValue;
+  const maskMode = options.materialMaskMode ?? 'set';
+
+  const edgeLen = seg + 1;
+  const lonSpan = bounds.maxLon - bounds.minLon;
+  const latSpan = bounds.maxLat - bounds.minLat;
+
+  let minIx = seg, maxIx = 0, minIy = seg, maxIy = 0;
+  let anyHit = false;
+
+  for (let iy = 0; iy <= seg; iy++) {
+    const lat = bounds.maxLat - (iy / seg) * latSpan;
+    for (let ix = 0; ix <= seg; ix++) {
+      const lon = bounds.minLon + (ix / seg) * lonSpan;
+      const dist = Math.hypot(lon - options.lon, lat - options.lat);
+      if (dist > r) continue;
+
+      anyHit = true;
+      if (ix < minIx) minIx = ix;
+      if (ix > maxIx) maxIx = ix;
+      if (iy < minIy) minIy = iy;
+      if (iy > maxIy) maxIy = iy;
+
+      const t = 1 - dist / r;
+      const w = falloffMode === 'linear' ? t : t * t * (3 - 2 * t);
+      const idx = iy * edgeLen + ix;
+      const curH = elevations[idx] ?? 0;
+
+      if (mode === 'flatten') {
+        elevations[idx] = curH + (targetElev - curH) * w;
+      } else if (mode === 'smooth') {
+        const hL = elevations[iy * edgeLen + Math.max(0, ix - 1)] ?? curH;
+        const hR = elevations[iy * edgeLen + Math.min(seg, ix + 1)] ?? curH;
+        const hU = elevations[Math.max(0, iy - 1) * edgeLen + ix] ?? curH;
+        const hD = elevations[Math.min(seg, iy + 1) * edgeLen + ix] ?? curH;
+        const avg = (hL + hR + hU + hD) * 0.25;
+        elevations[idx] = curH + (avg - curH) * w;
+      } else {
+        elevations[idx] = curH + delta * w;
+      }
+
+      if (maskVal !== undefined) {
+        const curM = materialMask[idx] ?? 0;
+        if (maskMode === 'max') {
+          materialMask[idx] = Math.max(curM, maskVal * w);
+        } else if (maskMode === 'add') {
+          materialMask[idx] = Math.max(0, Math.min(1, curM + maskVal * w));
+        } else {
+          materialMask[idx] = curM + (maskVal - curM) * w;
+        }
+      }
+    }
+  }
+
+  return anyHit ? { minIx, maxIx, minIy, maxIy } : null;
 }
 
 function computeMeshBounds(vertices: Float32Array): {

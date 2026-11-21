@@ -1,4 +1,12 @@
-export { Engine, type EngineOptions, type EnginePreset, type EnginePlugin, type TickCallback } from './core/Engine';
+export {
+  Engine,
+  DEFAULT_MAX_FPS,
+  sanitizeMaxFps,
+  type EngineOptions,
+  type EnginePreset,
+  type EnginePlugin,
+  type TickCallback,
+} from './core/Engine';
 export { vec3, quat, mat4, type Vec3, type Quat, type Mat4 } from './core/Math';
 export { WorldStore, DirtyFlag, GeometryTypeId, LightKindId, MAX_ENTITIES_DEFAULT, MAX_MORPH_TARGETS } from './core/WorldStore';
 export {

@@ -35,11 +35,21 @@ import { Camera } from '../controls/OrbitControls';
 
 export type EnginePreset = 'studio' | 'outdoor' | 'dark-ui' | 'cad-blueprint' | 'minimal';
 
+export const DEFAULT_MAX_FPS = 30;
+
+export function sanitizeMaxFps(fps?: number): number {
+  if (fps === undefined) return DEFAULT_MAX_FPS;
+  if (fps === 0 || fps === Infinity) return 0;
+  if (!Number.isFinite(fps) || fps < 0) return DEFAULT_MAX_FPS;
+  return Math.max(1, fps);
+}
+
 export interface EngineOptions {
   canvas?: HTMLCanvasElement | string;
   preset?: EnginePreset;
   quality?: QualityMode;
   maxDpr?: number;
+  maxFps?: number;
   autoResize?: boolean;
   antialias?: boolean;
   maxEntities?: number;
@@ -80,6 +90,8 @@ export class Engine {
   private rafId: number | null = null;
   private lastTime = 0;
   private elapsed = 0;
+  private maxFpsLimit = DEFAULT_MAX_FPS;
+  private minFrameIntervalMs = 1000 / DEFAULT_MAX_FPS;
   private readonly tickCallbacks = new Set<TickCallback>();
   private readonly entitiesById = new Map<number, EntityHandle>();
   private readonly entitiesByName = new Map<string, EntityHandle>();
@@ -139,8 +151,20 @@ export class Engine {
     };
     const renderer = new Renderer(gpu, store, preset, rendererOptions);
     const engine = new Engine(gpu, renderer, store, preset);
+    engine.setMaxFps(options.maxFps ?? DEFAULT_MAX_FPS);
     engine.start();
     return engine;
+  }
+
+  get maxFps(): number {
+    return this.maxFpsLimit;
+  }
+
+  setMaxFps(fps: number): this {
+    const clean = sanitizeMaxFps(fps);
+    this.maxFpsLimit = clean;
+    this.minFrameIntervalMs = clean > 0 ? 1000 / clean : 0;
+    return this;
   }
 
   get isLowSpec(): boolean {
@@ -760,7 +784,12 @@ export class Engine {
     if (this.rafId !== null) return;
     this.lastTime = performance.now();
     const loop = (now: number) => {
-      const dt = Math.min((now - this.lastTime) / 1000, 0.1);
+      this.rafId = requestAnimationFrame(loop);
+      const deltaMs = now - this.lastTime;
+      if (this.minFrameIntervalMs > 0 && deltaMs < this.minFrameIntervalMs - 0.5) {
+        return;
+      }
+      const dt = Math.min(Math.max(deltaMs, 0) / 1000, 0.1);
       this.lastTime = now;
       this.elapsed += dt;
       for (const cb of this.tickCallbacks) {
@@ -769,7 +798,6 @@ export class Engine {
       this.sceneSync.updateTweens(dt);
       this.store.updateMatrices();
       this.renderer.renderFrame(this.camera, this.elapsed);
-      this.rafId = requestAnimationFrame(loop);
     };
     this.rafId = requestAnimationFrame(loop);
   }

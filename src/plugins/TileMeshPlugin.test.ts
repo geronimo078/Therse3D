@@ -321,4 +321,44 @@ describe('TileMeshPlugin', () => {
     expect(westEdge.materialMask).toBeCloseTo(0.85, 2);
     expect(eastEdge.materialMask).toBeCloseTo(0.85, 2);
   });
+
+  it('preserves local terrain deformations when updateLOD changes tile resolution', () => {
+    const { engine } = createMockEngine();
+    const tiles = TileMeshPlugin(engine, {
+      mode: 'planar',
+      originGeo: [0, 0],
+      metersPerDegree: 1,
+      autoLod: true,
+      lodLevels: [
+        { maxDistance: 5, segments: 16 },
+        { maxDistance: Infinity, segments: 4 },
+      ],
+    });
+
+    // Start far away -> 4x4 LOD
+    engine.camera.position.set([0, 20, 0]);
+    const rec = tiles.setTile({
+      id: 'lod-deform',
+      bounds: { minLon: -2, maxLon: 2, minLat: -2, maxLat: 2 },
+    });
+    expect(rec.segments).toBe(4);
+
+    // Sculpt a hill at center (0, 0)
+    tiles.deformRegion({
+      lon: 0,
+      lat: 0,
+      radiusDeg: 1.0,
+      deltaElevation: 0.75,
+      materialMaskValue: 0.9,
+    });
+    expect(tiles.sampleSurface(0, 0)!.elevation).toBeCloseTo(0.75, 2);
+
+    // Zoom camera close -> upgrades LOD 4 -> 16; deformation must NOT be reset!
+    const changed = tiles.updateLOD([0, 2, 0]);
+    expect(changed).toBe(1);
+    expect(tiles.getTile('lod-deform')!.segments).toBe(16);
+    const afterZoom = tiles.sampleSurface(0, 0)!;
+    expect(afterZoom.elevation).toBeCloseTo(0.75, 2);
+    expect(afterZoom.materialMask).toBeCloseTo(0.9, 2);
+  });
 });

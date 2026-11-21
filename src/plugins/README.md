@@ -37,7 +37,7 @@ tiles.setTile({
 - **Surface Queries (`sampleSurface`):**
   - `sampleSurface(lon, lat): SurfaceSample | null` — Barycentrically interpolates the **actual rendered triangle** at `(lon, lat)`, returning `elevation`, `worldPosition`, `normal`, `slope`, `slopeDeg`, `surfaceType` (`'land' | 'water'`), `isWater`, `materialMask`, `tileId`, and `revision`.
 - **In-Place Terrain Deformation (`deformRegion`):**
-  - `deformRegion(options: TileDeformOptions): TileDeformResult` — Locally modifies heights (`'add' | 'flatten' | 'smooth'`) and `materialMask` across all intersecting tiles, recomputes cross-border normals and skirt edges, patches the existing GPU vertex buffer in-place (`engine.updateMeshVertices`), updates world bounds, and increments `revision`.
+  - `deformRegion(options: TileDeformOptions): TileDeformResult` — Locally modifies heights (`'add' | 'flatten' | 'smooth'`) and `materialMask` across all intersecting tiles, recomputes cross-border normals and skirt edges, patches the existing GPU vertex buffer in-place (`engine.updateMeshVertices`), updates world bounds, and increments `revision`. Recorded deformations are automatically replayed across `updateLOD()` resolution transitions so edits are never lost when zooming in or out.
 - **Picking & Cleanup:**
   - `pick(x, y): TilePickHit | null` — Ray-casts against each tile's true world AABB.
   - `dispose(): void` — Automatically invoked when `app.dispose()` runs, freeing all GPU buffers and `onTick` listeners.

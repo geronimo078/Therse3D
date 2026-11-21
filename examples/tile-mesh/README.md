@@ -18,7 +18,7 @@ Interactive WebGPU demonstration of **therse3d**'s optional `TileMeshPlugin` for
 4. **Exact Surface Queries (`sampleSurface`) & Picking (`tiles.pick`)**
    - Click any tile to select it and inspect its `revision`, LOD resolution, and live `sampleSurface(lon, lat)` readout (`elevation`, `slopeDeg`, `land`/`water`).
 5. **Local Terrain Deformation (`deformRegion`)**
-   - Toggle **Click: Inspect → Raise Hill (+) → Sculpt Crater (-)** to deform terrain heights and `materialMask` live across tile boundaries with in-place GPU vertex buffer patching.
+   - Toggle **Click: Inspect → Raise Hill (+) → Sculpt Crater (-)** to deform terrain heights and `materialMask` live across tile boundaries with in-place GPU vertex buffer patching. Sculpted deformations are preserved automatically when zooming in or out across LOD levels.
 6. **Deterministic GPU Buffer Lifecycle**
    - **Replace Selected** (`setTile`), **Remove Selected** (`removeTile`), and **Async Stream Tile** (`loadTile`) immediately unload superseded GPU vertex/index buffers via `engine.unloadMesh()`.
 
