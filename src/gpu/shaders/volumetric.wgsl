@@ -66,7 +66,7 @@ fn fbm3(p: vec3<f32>) -> f32 {
   var val = 0.0;
   var amp = 0.5;
   var freq = 1.0;
-  for (var i = 0; i < 4; i++) {
+  for (var i = 0; i < 3; i++) {
     val += amp * noise3(p * freq);
     freq *= 2.07;
     amp *= 0.5;
@@ -80,7 +80,7 @@ fn henyeyGreenstein(cosTheta: f32, g: f32) -> f32 {
   return (1.0 - g2) / (4.0 * 3.14159265 * pow(denom, 1.5));
 }
 
-fn sampleCloudDensity(worldPos: vec3<f32>) -> f32 {
+fn sampleCloudDensity(worldPos: vec3<f32>, highDetail: bool) -> f32 {
   let density = vol.cloudParams.x;
   if (density <= 0.0001) {
     return 0.0;
@@ -127,17 +127,29 @@ fn sampleCloudDensity(worldPos: vec3<f32>) -> f32 {
     return 0.0;
   }
 
-  // Dynamic weather lifecycle: isotropic 3D domain-warped advection + buildup/dissipation + wispy edge erosion
-  let wx = fbm3(samplePos * 0.52 + vec3<f32>(t * 0.14, -t * 0.11, t * 0.15)) - 0.47;
-  let wz = fbm3(samplePos * 0.52 + vec3<f32>(-t * 0.12 + 5.3, t * 0.13 - 2.7, t * 0.10 + 1.9)) - 0.47;
-  let warpedPos = samplePos + vec3<f32>(wx, (wx - wz) * 0.5, wz) * 0.95;
-  let baseNoise = fbm3(warpedPos);
-  let lifecycle = fbm3(samplePos * 0.40 + vec3<f32>(-t * 0.20, t * 0.24, t * 0.18));
-  let edgeErosion = fbm3(warpedPos * 2.25 - vec3<f32>(t * 0.26, 0.0, t * 0.22));
-
-  let localCoverage = clamp(coverage + (lifecycle - 0.47) * 0.55, 0.05, 0.95);
+  // Low-frequency lifecycle (1 octave is plenty for slow buildup/dissipation)
+  let lifecycle = noise3(samplePos * 0.42 + vec3<f32>(-t * 0.20, t * 0.24, t * 0.18));
+  let localCoverage = clamp(coverage + (lifecycle - 0.5) * 0.52, 0.05, 0.95);
   let threshold = 1.0 - localCoverage;
-  let shaped = smoothstep(threshold, threshold + 0.30, baseNoise - (1.0 - edgeErosion) * 0.10);
+
+  if (!highDetail) {
+    // Fast shadow-tap path: 2 noise3 calls total
+    let coarse = noise3(samplePos) * 0.65 + noise3(samplePos * 2.07) * 0.35;
+    return smoothstep(threshold, threshold + 0.30, coarse) * profile * density;
+  }
+
+  // Single-octave isotropic warp + 3-octave FBM base
+  let wx = noise3(samplePos * 0.52 + vec3<f32>(t * 0.14, -t * 0.11, t * 0.15)) - 0.5;
+  let wz = noise3(samplePos * 0.52 + vec3<f32>(-t * 0.12 + 5.3, t * 0.13 - 2.7, t * 0.10 + 1.9)) - 0.5;
+  let warpedPos = samplePos + vec3<f32>(wx, (wx - wz) * 0.5, wz) * 0.85;
+  let baseNoise = fbm3(warpedPos);
+
+  // Early-out before fine edge erosion when clearly outside a cloud
+  if (baseNoise < threshold - 0.06) {
+    return 0.0;
+  }
+  let edgeErosion = noise3(warpedPos * 2.35 - vec3<f32>(t * 0.26, 0.0, t * 0.22));
+  let shaped = smoothstep(threshold, threshold + 0.28, baseNoise - (1.0 - edgeErosion) * 0.09);
   return shaped * profile * density;
 }
 
@@ -184,12 +196,12 @@ fn computeCloudShadow(hitWorld: vec3<f32>, sunDir: vec3<f32>) -> f32 {
     return 1.0;
   }
 
-  let steps = 4;
+  let steps = 2;
   let stepLen = span / f32(steps);
   var opticalDepth = 0.0;
   for (var i = 0; i < steps; i++) {
     let t = t0 + (f32(i) + 0.5) * stepLen;
-    opticalDepth += sampleCloudDensity(hitWorld + sunDir * t) * stepLen;
+    opticalDepth += sampleCloudDensity(hitWorld + sunDir * t, false) * stepLen;
   }
   return exp(-opticalDepth * 1.85);
 }
@@ -272,24 +284,22 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
 
     let marchLen = tEnd - tStart;
     if (marchLen > 0.01) {
-      let steps = 28;
+      let steps = 16;
       let stepSize = marchLen / f32(steps);
       // Interleaved gradient noise jitter to eliminate banding
       let jitter = fract(52.9829189 * fract(dot(in.fragPos.xy, vec2<f32>(0.06711056, 0.00583715))));
       var t = tStart + jitter * stepSize;
 
       for (var i = 0; i < steps; i++) {
-        if (transmittance < 0.02) {
+        if (transmittance < 0.04) {
           break;
         }
         let pos = ro + rd * t;
-        let d = sampleCloudDensity(pos);
+        let d = sampleCloudDensity(pos, true);
         if (d > 0.001) {
-          // 2-tap directional sun-shadowing inside the cloud
-          let shadowStep = stepSize * 1.6;
-          let shadowDensity =
-            sampleCloudDensity(pos + sunDir * shadowStep) +
-            sampleCloudDensity(pos + sunDir * shadowStep * 2.2) * 0.65;
+          // Fast 1-tap directional sun-shadowing inside the cloud
+          let shadowStep = stepSize * 1.75;
+          let shadowDensity = sampleCloudDensity(pos + sunDir * shadowStep, false) * 1.45;
           let lightTrans = exp(-shadowDensity * shadowStep * 1.45);
           let powder = 1.0 - exp(-d * stepSize * 2.2);
           let sunEnergy = mix(0.25, 1.0, lightTrans) * (0.65 + 0.75 * phase) * mix(0.55, 1.25, powder);

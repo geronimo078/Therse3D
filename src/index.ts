@@ -130,4 +130,20 @@ export {
   type TileMeshPluginOptions,
   type BuildTileMeshOptions,
 } from './plugins/TileMeshPlugin';
+export {
+  SpriteParticlePlugin,
+  SpriteParticleManager,
+  PARTICLE_PRESETS,
+  generateParticleTexturePixels,
+  type ParticlePresetName,
+  type ParticleShape,
+  type ParticleSpawnArea,
+  type ParticleColorInput,
+  type ParticleEmitterOptions,
+  type ParticleEmitterPatch,
+  type ParticleEmitterHandle,
+  type ParticleEmitterSummary,
+  type SpriteParticlePluginOptions,
+  type SpriteParticleStats,
+} from './plugins/SpriteParticlePlugin';
 

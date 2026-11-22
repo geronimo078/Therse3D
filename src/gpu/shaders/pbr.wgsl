@@ -173,23 +173,54 @@ fn computeContactShadow(worldPos: vec3<f32>, N: vec3<f32>) -> f32 {
   return shadow;
 }
 
-fn computeDirectionalShadow(worldPos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
-  let lightClip = scene.lightViewProj * vec4<f32>(worldPos, 1.0);
+const SHADOW_POISSON = array<vec2<f32>, 12>(
+  vec2<f32>(-0.326212, -0.405810),
+  vec2<f32>(-0.840144, -0.073580),
+  vec2<f32>(-0.695914,  0.457137),
+  vec2<f32>(-0.203345,  0.620716),
+  vec2<f32>( 0.962340, -0.194983),
+  vec2<f32>( 0.473434, -0.480026),
+  vec2<f32>( 0.519456,  0.767022),
+  vec2<f32>( 0.185461, -0.893124),
+  vec2<f32>( 0.507431,  0.064425),
+  vec2<f32>( 0.896420,  0.412458),
+  vec2<f32>(-0.321940, -0.932615),
+  vec2<f32>(-0.791559, -0.597710),
+);
+
+fn computeDirectionalShadow(worldPos: vec3<f32>, N: vec3<f32>, L: vec3<f32>, fragXY: vec2<f32>) -> f32 {
+  let mapDims = vec2<f32>(textureDimensions(shadowMap));
+  let texelSize = 1.0 / mapDims;
+  let NdotL = clamp(dot(N, L), 0.0, 1.0);
+
+  // Normal-offset bias scales with world-space texel size (~16.0 / mapDims.x) to eliminate
+  // close-up shadow acne stripes on curved and sloped surfaces without Peter Panning.
+  let worldTexel = 16.0 / mapDims.x;
+  let normalBias = worldTexel * (1.25 + 2.25 * (1.0 - NdotL));
+  let biasedWorldPos = worldPos + N * normalBias;
+
+  let lightClip = scene.lightViewProj * vec4<f32>(biasedWorldPos, 1.0);
   let ndc = lightClip.xyz / max(lightClip.w, 1e-5);
   let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-  let inBounds = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0 && ndc.z >= 0.0 && ndc.z <= 1.0;
+  let edgeDist = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+  let fade = smoothstep(0.0, 0.04, edgeDist) * select(0.0, 1.0, ndc.z >= 0.0 && ndc.z <= 1.0);
 
-  let bias = max(0.0008 * (1.0 - max(dot(N, L), 0.0)), 0.00025);
-  let texelSize = 1.0 / 2048.0;
+  let depthBias = max(0.0005 * (1.0 - NdotL), 0.00015);
+  let refDepth = clamp(ndc.z - depthBias, 0.0, 1.0);
+
+  // Per-pixel rotated 12-tap Poisson-disk PCF (Interleaved Gradient Noise) removes grid banding
+  let ign = fract(52.9829189 * fract(dot(fragXY, vec2<f32>(0.06711056, 0.00583715))));
+  let angle = ign * 6.2831853;
+  let rot = mat2x2<f32>(cos(angle), -sin(angle), sin(angle), cos(angle));
+  let filterRadius = texelSize * 1.5;
+
   var sum = 0.0;
-  for (var y = -1; y <= 1; y++) {
-    for (var x = -1; x <= 1; x++) {
-      let offset = vec2<f32>(f32(x), f32(y)) * texelSize;
-      sum += textureSampleCompareLevel(shadowMap, shadowSampler, uv + offset, ndc.z - bias);
-    }
+  for (var i = 0; i < 12; i++) {
+    let offset = (rot * SHADOW_POISSON[i]) * filterRadius;
+    sum += textureSampleCompareLevel(shadowMap, shadowSampler, uv + offset, refDepth);
   }
-  let pcf = sum / 9.0;
-  return select(1.0, pcf, inBounds);
+  let pcf = sum / 12.0;
+  return mix(1.0, pcf, fade);
 }
 
 fn acesToneMap(x: vec3<f32>) -> vec3<f32> {
@@ -292,7 +323,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let hasCustomLights = lightCount > 0;
 
   var Lo = vec3<f32>(0.0);
-  let dirShadow = computeDirectionalShadow(in.worldPos, N, keyDir);
+  let dirShadow = computeDirectionalShadow(in.worldPos, N, keyDir, in.clipPos.xy);
   if (!hasCustomLights) {
     Lo += evalLight(N, V, keyDir, scene.keyLightColor.rgb * 2.4, albedo, metalness, roughness, F0) * mix(0.25, 1.0, dirShadow);
     Lo += evalLight(N, V, fillDir, vec3<f32>(0.45, 0.52, 0.65), albedo, metalness, roughness, F0);

@@ -541,6 +541,9 @@ export class Renderer {
         format: 'depth24plus',
         depthWriteEnabled: true,
         depthCompare: 'less',
+        depthBias: 2,
+        depthBiasSlopeScale: 2.0,
+        depthBiasClamp: 0.01,
       },
     });
 

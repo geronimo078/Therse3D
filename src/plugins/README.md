@@ -41,3 +41,43 @@ tiles.setTile({
 - **Picking & Cleanup:**
   - `pick(x, y): TilePickHit | null` — Ray-casts against each tile's true world AABB.
   - `dispose(): void` — Automatically invoked when `app.dispose()` runs, freeing all GPU buffers and `onTick` listeners.
+
+---
+
+# Sprite Particle Engine Plugin (`src/plugins/SpriteParticlePlugin.ts`)
+
+An optional **therse3d** `EnginePlugin` for billboarded 3D sprite particle effects (fire, smoke, magic spells, rain, snow, sparks, explosions, and custom emitters) using a zero-allocation SoA TypedArray pool and procedural RGBA particle textures.
+
+## Quick Start
+
+```typescript
+import { Engine, OrbitControls, SpriteParticlePlugin } from 'therse3d';
+
+const app = await Engine.create('#canvas', {
+  preset: 'studio',
+  bloom: { enabled: true, threshold: 0.9, strength: 0.55 },
+});
+app.use(OrbitControls({ distance: 8 }));
+
+const particles = SpriteParticlePlugin(app, { maxParticles: 400 });
+
+particles.createEmitter({ id: 'campfire', preset: 'fire', position: [-2, 0.2, 0] });
+particles.createEmitter({ id: 'spell', preset: 'magic', position: [0, 0.2, 0] });
+particles.createEmitter({ id: 'rain', preset: 'rain', position: [0, 6, 0] });
+
+// One-shot radial burst (e.g., hit sparks or explosion)
+particles.burst({ preset: 'explosion', position: [2, 1, 0] }, 48);
+```
+
+## Core API (`SpriteParticleManager`)
+
+- **Built-in Presets (`PARTICLE_PRESETS`):** `'fire'`, `'smoke'`, `'magic'`, `'rain'`, `'snow'`, `'sparks'`, `'explosion'`, and `'custom'`.
+- **Procedural Shapes (`generateParticleTexturePixels`):** `'soft-circle'`, `'spark'`, `'ring'`, `'streak'`, `'snowflake'` — generated with zero DOM/asset dependencies and cached per manager instance (or override with a custom `textureId`).
+- **Emitter Management:**
+  - `createEmitter(options): ParticleEmitterHandle` — Creates a continuous or burst-only emitter with configurable `spawnArea` (`'point' | 'box' | 'sphere' | 'ring'`), `velocity`, `gravity`, `drag`, `turbulence`, `swirlSpeed`, `lifetime`, `startSize`/`endSize`, `aspectRatio`, `startColor`/`endColor`, and `fadeIn`/`fadeOut`.
+  - `updateEmitter(id, patch)` / `setEmitterPosition(id, pos)` / `setEmitterEnabled(id, enabled)` / `removeEmitter(id)` / `listEmitters()`.
+  - `burst(emitterIdOrOptions, count?)` — Spawns an instant burst of particles.
+- **Simulation & Lifecycle:**
+  - `update(dt)` — Zero-allocation SoA integration loop (automatically hooked to `engine.onTick` unless `autoUpdate: false`).
+  - `pause()` / `resume()` / `clear()` / `getStats()`.
+  - `dispose()` — Automatically invoked on `app.dispose()`, removing all pooled `Sprite` entities and unsubscribing from `onTick`.
